@@ -9,6 +9,10 @@ tray glyph — what each agent is doing and when one is blocked waiting on you.
 > the agents you run in your terminal. It hooks into their lifecycle-event systems, so
 > IDE extensions (VS Code Copilot pane, etc.) and web chats are **not** covered.
 
+| Sessions | Settings |
+|:---:|:---:|
+| ![Sessions dashboard — per-session status with Claude/Copilot badges](docs/screenshots/sessions.png) | ![Settings — per-event sounds and banners, per-tool mute, quiet hours](docs/screenshots/settings.png) |
+
 - ❓ an agent asked you a question
 - 🟡 waiting for permission / input (banner shows the actual prompt)
 - 🟢 working

@@ -4,3 +4,4 @@ app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/schemas/
 app/assets/icon-1024.png
+dist/

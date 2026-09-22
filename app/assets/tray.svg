@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <!-- menu-bar template glyph: black-on-transparent board + ping dot -->
+  <rect x="5" y="9" width="27" height="28" rx="7" fill="none" stroke="#000" stroke-width="3.4"/>
+  <line x1="11" y1="18" x2="26" y2="18" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>
+  <line x1="11" y1="24" x2="22" y2="24" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>
+  <line x1="11" y1="30" x2="25" y2="30" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>
+  <circle cx="36" cy="9" r="6.4" fill="#000"/>
+</svg>

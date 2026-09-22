@@ -43,7 +43,30 @@ No sockets, no daemons: either side keeps working if the other is absent.
 - Optional: `terminal-notifier` (`brew install terminal-notifier`) for logo banners
 - For building: Node 20+, Rust stable
 
-## Setup
+## Install
+
+### Homebrew (recommended)
+
+```bash
+brew tap imyuvii/tap
+brew install --cask --no-quarantine dev-pilot-board
+```
+
+(`--no-quarantine` is needed because test builds are unsigned.) Then open
+**Dev Pilot Board**, and click **Set up hooks** on the first-launch card — it
+installs the notification script and registers the Claude Code + Copilot CLI
+hooks (your `settings.json` is backed up first). Restart running agent
+sessions and you're done.
+
+### Release zip
+
+Grab the latest zip from [Releases](https://github.com/imyuvii/dev-pilot-board/releases),
+unzip, and run `./install.sh` — it installs the app to /Applications
+(clearing the quarantine flag), sets up all hooks, and launches the app.
+
+## Manual setup
+
+Prefer to wire it yourself? The pieces below are what the setup automates.
 
 ### 1. Hook script
 

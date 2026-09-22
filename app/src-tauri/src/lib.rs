@@ -1,8 +1,20 @@
+mod setup;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+
+#[tauri::command]
+fn hooks_status() -> bool {
+    setup::hooks_installed()
+}
+
+#[tauri::command]
+fn setup_hooks() -> Result<String, String> {
+    setup::setup_hooks_impl()
+}
 
 /// Frontend sets a short status glyph next to the tray icon (macOS shows it as text).
 #[tauri::command]
@@ -31,6 +43,21 @@ fn play_sound(sound: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Headless hook setup for CLI use and packaging tests:
+    //   "Dev Pilot Board.app/Contents/MacOS/app" --setup-hooks
+    if std::env::args().any(|a| a == "--setup-hooks") {
+        match setup::setup_hooks_impl() {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("setup failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
@@ -91,7 +118,12 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .invoke_handler(tauri::generate_handler![set_tray_title, play_sound])
+        .invoke_handler(tauri::generate_handler![
+            set_tray_title,
+            play_sound,
+            hooks_status,
+            setup_hooks
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

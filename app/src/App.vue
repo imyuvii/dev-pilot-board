@@ -6,6 +6,31 @@ import Settings from "./Settings.vue";
 
 const view = ref<"sessions" | "settings">("sessions");
 
+// first-launch hook setup
+const hooksOk = ref(true);
+const settingUp = ref(false);
+const setupMsg = ref("");
+
+async function checkHooks() {
+  try {
+    hooksOk.value = await invoke<boolean>("hooks_status");
+  } catch {
+    hooksOk.value = true; // fail quiet — never block the dashboard
+  }
+}
+async function runSetup() {
+  settingUp.value = true;
+  setupMsg.value = "";
+  try {
+    setupMsg.value = await invoke<string>("setup_hooks");
+    hooksOk.value = true;
+  } catch (e) {
+    setupMsg.value = String(e);
+  } finally {
+    settingUp.value = false;
+  }
+}
+
 const STATE_FILE = ".claude/notify-state.jsonl";
 const STALE_MS = 12 * 60 * 60 * 1000; // hide sessions idle > 12h
 
@@ -141,6 +166,7 @@ async function poll() {
 }
 
 onMounted(() => {
+  checkHooks();
   poll();
   pollTimer = window.setInterval(poll, 2000);
   clockTimer = window.setInterval(() => (now.value = Date.now()), 1000);
@@ -168,6 +194,24 @@ onUnmounted(() => {
       <Settings v-if="view === 'settings'" />
 
       <template v-if="view === 'sessions'">
+        <div v-if="!hooksOk || setupMsg" class="setup-card">
+          <template v-if="!hooksOk">
+            <div class="setup-title">🔌 Connect your agents</div>
+            <div class="setup-sub">
+              One click installs the notification hooks for Claude Code and
+              Copilot CLI (your settings are backed up first).
+            </div>
+            <button class="setup-btn" :disabled="settingUp" @click="runSetup">
+              {{ settingUp ? "Setting up…" : "Set up hooks" }}
+            </button>
+            <div v-if="setupMsg" class="setup-msg">{{ setupMsg }}</div>
+          </template>
+          <template v-else>
+            <div class="setup-title">✅ Hooks installed</div>
+            <div class="setup-msg">{{ setupMsg }}</div>
+          </template>
+        </div>
+
         <div class="sec-head">
           <span class="sec-label">ACTIVE SESSIONS</span>
           <span class="sec-count">{{ sessions.length }}</span>
@@ -288,6 +332,20 @@ header {
 .tabs button.active { background: var(--accent); color: var(--accentInk); }
 
 .scroll { flex: 1; overflow-y: auto; padding: 2px 14px 14px; }
+
+.setup-card {
+  background: var(--card); border: 1px solid var(--accent);
+  border-radius: 12px; padding: 13px; margin-bottom: 12px;
+}
+.setup-title { font-weight: 600; font-size: 13.5px; }
+.setup-sub { font-size: 12px; color: var(--ink2); margin-top: 3px; line-height: 1.5; }
+.setup-btn {
+  margin-top: 10px; border: none; border-radius: 8px; padding: 7px 14px;
+  background: var(--accent); color: var(--accentInk);
+  font: 600 12.5px "Outfit", system-ui, sans-serif; cursor: pointer;
+}
+.setup-btn:disabled { opacity: 0.6; cursor: default; }
+.setup-msg { font-size: 11.5px; color: var(--ink2); margin-top: 8px; line-height: 1.5; }
 
 .sec-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -94,6 +94,21 @@ the hook script reads it. Either side works when the other is absent.
 - **FR-20** Sound precedence: `CLAUDE_NOTIFY_SOUND_<EVENT>` env var > config file >
   built-in default.
 
+### 3.6 Onboarding & distribution
+
+- **FR-21** In-app hook setup: when no notify.sh hooks are detected in
+  `~/.claude/settings.json`, the dashboard shows a "Connect your agents" card;
+  one click installs `~/.claude/notify.sh` (embedded in the binary), merges the
+  Claude Code hook events into `settings.json` (timestamped backup first),
+  writes the Copilot CLI hook file, and installs embedded banner icons —
+  offline, no companion script.
+- **FR-22** The same setup is reachable headless via the `--setup-hooks` CLI
+  flag (used by packaging tests and power users).
+- **FR-23** Distribution channels: a Homebrew cask (`imyuvii/tap/dev-pilot-board`,
+  postflight clears the quarantine flag of the unsigned build) and a GitHub
+  release zip whose `install.sh` installs the app, clears quarantine, and sets
+  up hooks in one command.
+
 ## 4. Non-functional requirements
 
 - **NFR-1** Footprint: resident memory well under Electron-class usage (Tauri; target
@@ -110,6 +125,8 @@ the hook script reads it. Either side works when the other is absent.
 ## 5. Out of scope (current version)
 
 - Windows/Linux notification delivery scripts
+- Apple code signing / notarization (unsigned test builds; installers and the
+  cask postflight clear the quarantine flag instead)
 - Click-to-focus the originating terminal window
 - Auto-start at login
 - Per-project notification rules and snooze

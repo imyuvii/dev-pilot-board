@@ -146,10 +146,11 @@ notify.sh              # hook target for both tools (delivery + state log)
 app/                   # Tauri 2 + Vue 3 desktop app
   src/App.vue          #   dashboard
   src/Settings.vue     #   settings panel
-  src-tauri/           #   Rust shell (tray, window, commands)
+  src-tauri/           #   Rust shell (tray, window, commands, hook setup)
   assets/              #   icon sources (SVG)
+scripts/               # tester install/uninstall scripts + INSTALL.md
 docs/requirements.md   # product requirements
-AGENTS.md              # guidance for AI coding agents working on this repo
+AGENTS.md              # guidance for AI coding agents (incl. release process)
 ```
 
 ## License

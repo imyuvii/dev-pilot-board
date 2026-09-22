@@ -4,6 +4,11 @@ A menu-bar status board for your AI coding agents. Watches **Claude Code** and *
 Copilot CLI** sessions and tells you — with per-event sounds, native banners, and a
 tray glyph — what each agent is doing and when one is blocked waiting on you.
 
+> **Works with the terminal (CLI) tools**: [Claude Code](https://claude.com/claude-code)
+> and [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli) —
+> the agents you run in your terminal. It hooks into their lifecycle-event systems, so
+> IDE extensions (VS Code Copilot pane, etc.) and web chats are **not** covered.
+
 - ❓ an agent asked you a question
 - 🟡 waiting for permission / input (banner shows the actual prompt)
 - 🟢 working
@@ -109,3 +114,7 @@ app/                   # Tauri 2 + Vue 3 desktop app
 docs/requirements.md   # product requirements
 AGENTS.md              # guidance for AI coding agents working on this repo
 ```
+
+## License
+
+[MIT](LICENSE)

@@ -32,7 +32,7 @@ interface EventCfg {
 }
 
 interface Config {
-  master_mute: boolean;
+  mute: { claude: boolean; copilot: boolean };
   quiet_hours: { enabled: boolean; start: string; end: string };
   events: Record<string, EventCfg>;
 }
@@ -43,7 +43,7 @@ function defaults(): Config {
     events[e.key] = { sound: e.sound, sound_enabled: true, banner_enabled: e.banner };
   }
   return {
-    master_mute: false,
+    mute: { claude: false, copilot: false },
     quiet_hours: { enabled: false, start: "22:00", end: "08:00" },
     events,
   };
@@ -59,7 +59,12 @@ onMounted(async () => {
       const text = await readTextFile(CONFIG_FILE, { baseDir: BaseDirectory.Home });
       const stored = JSON.parse(text);
       const merged = defaults();
-      merged.master_mute = stored.master_mute ?? merged.master_mute;
+      merged.mute = { ...merged.mute, ...(stored.mute ?? {}) };
+      if (stored.master_mute === true) {
+        // migrate legacy single switch
+        merged.mute.claude = true;
+        merged.mute.copilot = true;
+      }
       merged.quiet_hours = { ...merged.quiet_hours, ...(stored.quiet_hours ?? {}) };
       for (const key of Object.keys(merged.events)) {
         merged.events[key] = { ...merged.events[key], ...(stored.events?.[key] ?? {}) };
@@ -101,8 +106,12 @@ function preview(sound: string) {
   <div class="settings">
     <section class="card">
       <label class="row master">
-        <span>🔕 Mute all notifications</span>
-        <input type="checkbox" v-model="config.master_mute" />
+        <span>🔕 Mute Claude notifications</span>
+        <input type="checkbox" v-model="config.mute.claude" />
+      </label>
+      <label class="row master">
+        <span>🔕 Mute Copilot notifications</span>
+        <input type="checkbox" v-model="config.mute.copilot" />
       </label>
     </section>
 
@@ -125,7 +134,7 @@ function preview(sound: string) {
         <span class="col">Banner</span>
         <span class="ev-sound">Tone</span>
       </div>
-      <div v-for="e in EVENTS" :key="e.key" class="ev-row" :class="{ off: config.master_mute }">
+      <div v-for="e in EVENTS" :key="e.key" class="ev-row" :class="{ off: config.mute.claude && config.mute.copilot }">
         <span class="ev-name">{{ e.icon }} {{ e.label }}</span>
         <span class="col">
           <input type="checkbox" v-model="config.events[e.key].sound_enabled" />
@@ -157,6 +166,7 @@ function preview(sound: string) {
 .row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
 .row small { color: #8a8a93; font-size: 11px; }
 .row.master { font-weight: 600; }
+.row.master + .row.master { margin-top: 8px; }
 .row.times { justify-content: flex-start; gap: 16px; margin-top: 10px; font-size: 12px; color: #c9c9d1; }
 .row.times input { margin-left: 6px; background: #16161d; color: #e8e8ec; border: 1px solid #33333f; border-radius: 6px; padding: 3px 6px; }
 

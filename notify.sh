@@ -63,8 +63,11 @@ SOUND_ON=1
 # ---- User preferences from the app's Settings panel ------------------------
 CONFIG="$HOME/.claude/notify-config.json"
 if [ -f "$CONFIG" ] && command -v jq >/dev/null 2>&1; then
-  # Master mute: log-only, nothing audible or visible
-  [ "$(jq -r '.master_mute // false' "$CONFIG" 2>/dev/null)" = "true" ] && exit 0
+  # Per-source mute (legacy master_mute honored as fallback): log-only, nothing audible or visible
+  MUTED=$(jq -r --arg k "$SOURCE" \
+    '. as $r | ($r.mute[$k] | if . == null then ($r.master_mute // false) else . end)' \
+    "$CONFIG" 2>/dev/null)
+  [ "$MUTED" = "true" ] && exit 0
 
   # Note: "// d" would swallow a stored `false`, so null-check explicitly
   CFG=$(jq -r --arg e "$EVENT" \

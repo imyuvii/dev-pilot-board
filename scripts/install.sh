@@ -21,6 +21,18 @@ if [ ! -f "$SCRIPT_DIR/notify.sh" ]; then
   exit 1
 fi
 
+# ── the app itself ───────────────────────────────────────────────────────────
+# Copy to /Applications and clear the quarantine flag so Gatekeeper never
+# shows the "could not verify" dialog for this unsigned test build.
+if [ -d "$SCRIPT_DIR/Dev Pilot Board.app" ]; then
+  rm -rf "/Applications/Dev Pilot Board.app"
+  cp -R "$SCRIPT_DIR/Dev Pilot Board.app" /Applications/
+  xattr -dr com.apple.quarantine "/Applications/Dev Pilot Board.app" 2>/dev/null || true
+  echo "✓ Installed Dev Pilot Board.app to /Applications (quarantine cleared)"
+else
+  echo "ℹ App bundle not found next to installer — skipping app install."
+fi
+
 # ── notify.sh ────────────────────────────────────────────────────────────────
 mkdir -p "$CLAUDE_DIR"
 cp "$SCRIPT_DIR/notify.sh" "$NOTIFY_SH"
@@ -84,7 +96,10 @@ fi
 
 echo ""
 echo "── Done! ──"
-echo "1. Drag 'Dev Pilot Board.app' from the DMG into /Applications, then run once:"
-echo "     xattr -d com.apple.quarantine \"/Applications/Dev Pilot Board.app\""
-echo "2. Open the app — look for the board glyph in your menu bar."
-echo "3. Restart any running Claude Code / Copilot sessions so they load the hooks."
+if [ -d "/Applications/Dev Pilot Board.app" ]; then
+  open "/Applications/Dev Pilot Board.app" 2>/dev/null || true
+  echo "Dev Pilot Board is starting — look for the board glyph in your menu bar."
+else
+  echo "Open Dev Pilot Board.app — look for the board glyph in your menu bar."
+fi
+echo "Restart any running Claude Code / Copilot sessions so they load the hooks."

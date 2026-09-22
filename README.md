@@ -49,10 +49,20 @@ No sockets, no daemons: either side keeps working if the other is absent.
 
 ```bash
 brew tap imyuvii/tap
-brew install --cask --no-quarantine dev-pilot-board
+brew trust --cask imyuvii/tap/dev-pilot-board
+brew install --cask dev-pilot-board
 ```
 
-(`--no-quarantine` is needed because test builds are unsigned.) Then open
+(`brew trust` is required by Homebrew 7+ before installing from third-party
+taps. On older Homebrew, use `brew install --cask --no-quarantine
+dev-pilot-board` instead.) Because the build is unsigned, if macOS blocks the
+app on first open, clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Dev Pilot Board.app"
+```
+
+Then open
 **Dev Pilot Board**, and click **Set up hooks** on the first-launch card — it
 installs the notification script and registers the Claude Code + Copilot CLI
 hooks (your `settings.json` is backed up first). Restart running agent

@@ -29,6 +29,10 @@ if [ -d "$SCRIPT_DIR/Dev Pilot Board.app" ]; then
   cp -R "$SCRIPT_DIR/Dev Pilot Board.app" /Applications/
   xattr -dr com.apple.quarantine "/Applications/Dev Pilot Board.app" 2>/dev/null || true
   echo "✓ Installed Dev Pilot Board.app to /Applications (quarantine cleared)"
+  # Remove the still-quarantined staging copy so nobody double-clicks it later
+  # and hits Gatekeeper — from now on the app lives in /Applications only.
+  rm -rf "$SCRIPT_DIR/Dev Pilot Board.app"
+  echo "✓ Removed the copy in this folder — launch from /Applications or Spotlight"
 else
   echo "ℹ App bundle not found next to installer — skipping app install."
 fi

@@ -19,7 +19,11 @@ That's it. The installer:
 
 - copies **Dev Pilot Board.app** to /Applications and clears macOS's
   quarantine flag (this is an unsigned test build — without this step
-  Gatekeeper shows a *"could not verify"* warning), then launches it
+  Gatekeeper shows a *"could not verify"* warning), then launches it.
+  ⚠️ Don't double-click the `.app` in this downloaded folder — that copy
+  is still quarantined and macOS will block it. Always run `./install.sh`
+  first; afterwards launch from /Applications or Spotlight (the installer
+  removes the folder copy to avoid confusion).
 - installs the notification script to `~/.claude/notify.sh`
 - registers Claude Code hooks in `~/.claude/settings.json`
   (a timestamped backup is made first)

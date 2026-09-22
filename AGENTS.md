@@ -72,3 +72,12 @@ dashboard as fake sessions:
   (e.g. legacy `master_mute`).
 - The app must stay optional: sounds/banners work with the script alone, and the app
   must not error when the state file is missing.
+
+## Release process
+
+1. Bump the version in `app/src-tauri/tauri.conf.json`, `app/package.json`, and `app/src-tauri/Cargo.toml`.
+2. `cd app && npm run tauri build -- --target universal-apple-darwin` (both archs; verify with `lipo -archs`).
+3. Package: `dist/dev-pilot-board-<v>/` = the `.app` (via `ditto`) + `notify.sh` + `scripts/{install.sh,uninstall.sh,INSTALL.md}`; zip with `ditto -c -k --keepParent`. The folder name inside the zip must match the cask's `app` stanza path.
+4. `git tag v<v>`, push, `gh release create v<v> <zip> ...` (absolute asset path — a relative one has failed before).
+5. Update `Casks/dev-pilot-board.rb` in the `imyuvii/homebrew-tap` repo: bump `version`, set `sha256` from `shasum -a 256` of the zip, push.
+6. Version rule: packaging/docs-only fixes may replace the release asset in place (`gh release upload --clobber`); any app or notify.sh behavior change gets a version bump.

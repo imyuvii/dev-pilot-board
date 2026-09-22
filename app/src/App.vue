@@ -35,7 +35,7 @@ let clockTimer: number | undefined;
 
 // event -> session status
 const STATUS_MAP: Record<string, string> = {
-  "session-start": "idle",
+  "session-start": "done",
   working: "working",
   compact: "working",
   failure: "working",
@@ -45,12 +45,11 @@ const STATUS_MAP: Record<string, string> = {
   stop: "done",
 };
 
-const STATUS_META: Record<string, { icon: string; label: string; rank: number }> = {
-  question: { icon: "❓", label: "Has a question", rank: 0 },
-  waiting: { icon: "🟡", label: "Waiting for you", rank: 1 },
-  working: { icon: "🟢", label: "Working", rank: 2 },
-  done: { icon: "⚪", label: "Done", rank: 3 },
-  idle: { icon: "⚪", label: "Idle", rank: 4 },
+const STATUS_META: Record<string, { emoji: string; label: string; rank: number }> = {
+  question: { emoji: "❓", label: "Needs an answer", rank: 0 },
+  waiting: { emoji: "🟡", label: "Waiting for input", rank: 1 },
+  working: { emoji: "🟢", label: "Working", rank: 2 },
+  done: { emoji: "⚪", label: "Idle", rank: 3 },
 };
 
 const EVENT_ICONS: Record<string, string> = {
@@ -62,22 +61,29 @@ const EVENT_ICONS: Record<string, string> = {
   compact: "🌀",
   "session-start": "🚀",
   "session-end": "🏁",
-  working: "🟢",
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  stop: "done responding",
+  waiting: "waiting for you",
+  question: "asked a question",
+  failure: "tool call failed",
+  "task-done": "background task finished",
+  compact: "compacting context",
+  "session-start": "session started",
+  "session-end": "session ended",
 };
 
 const sessions = computed<Session[]>(() => {
   const map = new Map<string, Session>();
-  const ended = new Set<string>();
   for (const e of events.value) {
     const key = e.session || e.cwd || e.project;
     if (e.event === "session-end") {
-      ended.add(key);
       map.delete(key);
       continue;
     }
     const status = STATUS_MAP[e.event];
     if (!status) continue;
-    ended.delete(key);
     map.set(key, {
       key,
       project: e.project,
@@ -148,99 +154,203 @@ onUnmounted(() => {
 <template>
   <main class="wrap">
     <header>
-      <h1>Dev Pilot Board</h1>
+      <div class="brand">
+        <span class="logo">🛩️</span>
+        <span class="title">Dev Pilot Board</span>
+      </div>
       <nav class="tabs">
         <button :class="{ active: view === 'sessions' }" @click="view = 'sessions'">Sessions</button>
         <button :class="{ active: view === 'settings' }" @click="view = 'settings'">Settings</button>
       </nav>
-      <span class="count" v-if="view === 'sessions'">{{ sessions.length }} session{{ sessions.length === 1 ? "" : "s" }}</span>
     </header>
 
-    <Settings v-if="view === 'settings'" />
+    <div class="scroll">
+      <Settings v-if="view === 'settings'" />
 
-    <section class="sessions" v-if="view === 'sessions'">
-      <div v-if="sessions.length === 0" class="empty">
-        No active sessions.<br />
-        <small>Start a Claude Code session and it will appear here.</small>
-      </div>
-      <div v-for="s in sessions" :key="s.key" class="session" :class="s.status">
-        <span class="icon">{{ STATUS_META[s.status].icon }}</span>
-        <div class="info">
-          <div class="project">
-            {{ s.project }}
-            <span class="badge" :class="s.source">{{ s.source === "copilot" ? "Copilot" : "Claude" }}</span>
-          </div>
-          <div class="detail">
-            {{ s.msg || STATUS_META[s.status].label }}
+      <template v-if="view === 'sessions'">
+        <div class="sec-head">
+          <span class="sec-label">ACTIVE SESSIONS</span>
+          <span class="sec-count">{{ sessions.length }}</span>
+        </div>
+
+        <div v-if="sessions.length === 0" class="empty">
+          <div class="empty-chip">🛩️</div>
+          <div class="empty-title">All quiet</div>
+          <div class="empty-sub">
+            No active agent sessions. Start Claude Code or<br />Copilot CLI and
+            sessions appear here automatically.
           </div>
         </div>
-        <span class="time">{{ ago(s.lastTs) }}</span>
-      </div>
-    </section>
 
-    <section class="history" v-if="view === 'sessions' && history.length">
-      <h2>Recent events</h2>
-      <div v-for="(e, i) in history" :key="i" class="event">
-        <span class="icon">{{ EVENT_ICONS[e.event] || "•" }}</span>
-        <span class="name">
-          {{ e.project }}<span v-if="e.source === 'copilot'" class="badge copilot">Copilot</span>
-        </span>
-        <span class="what">{{ e.msg || e.event }}</span>
-        <span class="time">{{ ago(Date.parse(e.ts)) }}</span>
-      </div>
-    </section>
+        <div class="cards" v-else>
+          <div v-for="s in sessions" :key="s.key" class="session" :class="s.status">
+            <span class="s-emoji" :title="STATUS_META[s.status].label">{{ STATUS_META[s.status].emoji }}</span>
+            <div class="s-info">
+              <div class="s-top">
+                <span class="s-project">{{ s.project }}</span>
+                <span class="badge" :class="s.source">{{ s.source === "copilot" ? "COPILOT" : "CLAUDE" }}</span>
+              </div>
+              <div class="s-msg">{{ s.msg || STATUS_META[s.status].label }}</div>
+            </div>
+            <span class="s-ago">{{ ago(s.lastTs) }}</span>
+          </div>
+        </div>
+
+        <div class="sec-head feed-head" v-if="history.length">
+          <span class="sec-label">RECENT EVENTS</span>
+        </div>
+        <div class="feed" v-if="history.length">
+          <div v-for="(e, i) in history" :key="i" class="event">
+            <span class="e-emoji">{{ EVENT_ICONS[e.event] || "•" }}</span>
+            <span class="e-project">{{ e.project }}</span>
+            <span v-if="e.source === 'copilot'" class="badge sm copilot">COPILOT</span>
+            <span class="e-label">{{ e.msg || EVENT_LABELS[e.event] || e.event }}</span>
+            <span class="e-ago">{{ ago(Date.parse(e.ts)) }}</span>
+          </div>
+        </div>
+      </template>
+    </div>
   </main>
 </template>
 
 <style>
 :root {
+  --win: #17191f;
+  --card: rgba(255, 255, 255, 0.045);
+  --card2: rgba(255, 255, 255, 0.08);
+  --ink: #f2f4f7;
+  --ink2: #a8afbb;
+  --ink3: #6d7480;
+  --line: rgba(255, 255, 255, 0.08);
+  --accent: #34d399;
+  --accentInk: #04251a;
+  --warnBorder: rgba(250, 204, 21, 0.45);
+  --qBorder: rgba(251, 113, 133, 0.5);
+  --toggleOff: rgba(255, 255, 255, 0.12);
+  --sel: rgba(255, 255, 255, 0.07);
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+@media (prefers-color-scheme: light) {
+  :root {
+    --win: #fcfdfe;
+    --card: rgba(9, 15, 25, 0.04);
+    --card2: rgba(9, 15, 25, 0.075);
+    --ink: #171a20;
+    --ink2: #565e6b;
+    --ink3: #8b93a1;
+    --line: rgba(9, 15, 25, 0.09);
+    --accent: #0d9d6d;
+    --accentInk: #ffffff;
+    --warnBorder: rgba(202, 138, 4, 0.55);
+    --qBorder: rgba(225, 29, 72, 0.45);
+    --toggleOff: rgba(9, 15, 25, 0.14);
+    --sel: rgba(9, 15, 25, 0.06);
+    color-scheme: light;
+  }
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #16161d; color: #e8e8ec; }
+html, body, #app { height: 100%; }
+body {
+  background: var(--win);
+  color: var(--ink);
+  font-family: "Outfit", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(128, 134, 146, 0.35); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 
-.wrap { padding: 14px; display: flex; flex-direction: column; gap: 14px; height: 100vh; overflow-y: auto; }
+.wrap { height: 100%; display: flex; flex-direction: column; }
 
-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-h1 { font-size: 15px; font-weight: 600; }
-.tabs { display: flex; gap: 2px; background: #1f1f28; border-radius: 8px; padding: 2px; }
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 18px 12px; flex-shrink: 0;
+}
+.brand { display: flex; align-items: center; gap: 9px; }
+.logo {
+  width: 26px; height: 26px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), #1d9d74);
+  display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+
+.tabs {
+  display: flex; background: var(--card); border: 1px solid var(--line);
+  border-radius: 9px; padding: 3px; gap: 2px;
+}
 .tabs button {
-  background: transparent; color: #8a8a93; border: none; border-radius: 6px;
-  padding: 4px 10px; font-size: 11px; cursor: pointer;
+  border: none; border-radius: 6px; padding: 5px 12px;
+  font: 600 12.5px "Outfit", system-ui, sans-serif; cursor: pointer;
+  background: transparent; color: var(--ink2);
 }
-.tabs button.active { background: #2f2f3d; color: #e8e8ec; }
-.count { font-size: 11px; color: #8a8a93; }
+.tabs button.active { background: var(--accent); color: var(--accentInk); }
 
-.sessions { display: flex; flex-direction: column; gap: 6px; }
-.empty { text-align: center; color: #8a8a93; font-size: 13px; padding: 24px 0; line-height: 1.8; }
+.scroll { flex: 1; overflow-y: auto; padding: 2px 14px 14px; }
 
+.sec-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 4px 8px;
+}
+.feed-head { padding-top: 16px; }
+.sec-label {
+  font: 600 11px "Geist Mono", monospace; letter-spacing: 0.12em; color: var(--ink3);
+}
+.sec-count { font: 500 11px "Geist Mono", monospace; color: var(--ink3); }
+
+.cards { display: flex; flex-direction: column; gap: 8px; }
 .session {
-  display: flex; align-items: center; gap: 10px;
-  background: #1f1f28; border-radius: 10px; padding: 10px 12px;
-  border: 1px solid transparent;
+  display: flex; align-items: center; gap: 11px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 11px 13px;
 }
-.session.question { border-color: #7c5cff; }
-.session.waiting { border-color: #b8860b; }
-.session .icon { font-size: 16px; }
-.session .info { flex: 1; min-width: 0; }
-.session .project { font-size: 13px; font-weight: 600; }
-.badge {
-  font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
-  border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px;
+.session.waiting { border-color: var(--warnBorder); }
+.session.question { border-color: var(--qBorder); }
+.s-emoji { font-size: 15px; flex-shrink: 0; }
+.s-info { flex: 1; min-width: 0; }
+.s-top { display: flex; align-items: center; gap: 8px; }
+.s-project {
+  font-weight: 600; font-size: 13.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.badge.claude { background: #3a2f5a; color: #b9a5ff; }
-.badge.copilot { background: #1d3a5f; color: #7fb8ff; }
-.session .detail { font-size: 11px; color: #8a8a93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session .time { font-size: 11px; color: #8a8a93; flex-shrink: 0; }
+.s-msg {
+  font-size: 12px; color: var(--ink2); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.s-ago { font: 500 11px "Geist Mono", monospace; color: var(--ink3); flex-shrink: 0; }
 
-.history h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #8a8a93; margin-bottom: 8px; }
-.event {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12px; padding: 4px 2px; color: #c9c9d1;
+.badge {
+  font: 600 9.5px "Geist Mono", monospace; letter-spacing: 0.08em;
+  border-radius: 4px; padding: 2px 6px; flex-shrink: 0;
 }
-.event .icon { width: 18px; text-align: center; }
-.event .name { font-weight: 600; flex-shrink: 0; }
-.event .what { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #8a8a93; }
-.event .time { font-size: 10px; color: #6a6a72; flex-shrink: 0; }
+.badge.sm { font-size: 9px; padding: 1.5px 5px; }
+.badge.claude { background: rgba(124, 108, 246, 0.25); color: #c4b9ff; }
+.badge.copilot { background: rgba(79, 156, 249, 0.22); color: #a9cdff; }
+@media (prefers-color-scheme: light) {
+  .badge.claude { background: rgba(124, 108, 246, 0.16); color: #5b4bd6; }
+  .badge.copilot { background: rgba(79, 156, 249, 0.16); color: #1e6fd9; }
+}
+
+.empty { text-align: center; padding: 36px 20px 32px; }
+.empty-chip {
+  width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px;
+  background: var(--card); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center; font-size: 26px;
+}
+.empty-title { font-weight: 600; font-size: 15px; }
+.empty-sub { font-size: 12.5px; color: var(--ink2); margin-top: 4px; line-height: 1.5; }
+
+.feed { display: flex; flex-direction: column; }
+.event {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6.5px 4px; border-bottom: 1px solid var(--line);
+}
+.e-emoji { font-size: 11px; flex-shrink: 0; }
+.e-project { font-weight: 600; font-size: 12px; flex-shrink: 0; }
+.e-label {
+  font-size: 12px; color: var(--ink2); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.e-ago { font: 500 10.5px "Geist Mono", monospace; color: var(--ink3); flex-shrink: 0; }
 </style>

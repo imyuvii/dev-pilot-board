@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;-webkit-font-smoothing:antialiased;font-family:'Outfit',system-ui,sans-serif}
+  a{color:#34d399;text-decoration:none} a:hover{color:#6ee7b7}
+  [data-theme="dark"]{
+    --wall:radial-gradient(1200px 700px at 20% 0%,#12241d 0%,#0b0f14 45%,#07090d 100%);
+    --menubar:rgba(16,18,22,.72);--menuink:#e8eaee;
+    --win:rgba(24,26,31,.94);--winline:rgba(255,255,255,.09);
+    --card:rgba(255,255,255,.045);--card2:rgba(255,255,255,.08);
+    --ink:#f2f4f7;--ink2:#a8afbb;--ink3:#6d7480;
+    --line:rgba(255,255,255,.08);--accent:#34d399;--accentInk:#04251a;
+    --warnBorder:rgba(250,204,21,.45);--qBorder:rgba(251,113,133,.5);
+    --shadow:0 24px 70px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.4);
+    --toggleOff:rgba(255,255,255,.12);--sel:rgba(255,255,255,.07);
+  }
+  [data-theme="light"]{
+    --wall:radial-gradient(1200px 700px at 20% 0%,#d8efe4 0%,#eef1f5 50%,#e3e7ee 100%);
+    --menubar:rgba(250,251,252,.72);--menuink:#1c1e24;
+    --win:rgba(252,253,254,.95);--winline:rgba(0,0,0,.09);
+    --card:rgba(9,15,25,.04);--card2:rgba(9,15,25,.075);
+    --ink:#171a20;--ink2:#565e6b;--ink3:#8b93a1;
+    --line:rgba(9,15,25,.09);--accent:#0d9d6d;--accentInk:#ffffff;
+    --warnBorder:rgba(202,138,4,.55);--qBorder:rgba(225,29,72,.45);
+    --shadow:0 24px 70px rgba(20,30,45,.22),0 2px 8px rgba(20,30,45,.12);
+    --toggleOff:rgba(9,15,25,.14);--sel:rgba(9,15,25,.06);
+  }
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @keyframes bannerIn{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+  @keyframes popIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}
+  @keyframes pulseDot{0%,100%{opacity:1}50%{opacity:.35}}
+  ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:rgba(128,134,146,.35);border-radius:4px}::-webkit-scrollbar-track{background:transparent}
+</style>
+</helmet>
+<div ref="{{ rootRef }}" data-theme="{{ theme }}" style="min-height:100vh;background:var(--wall);color:var(--ink);display:flex;flex-direction:column;overflow:hidden">
+  <!-- ══ macOS menu bar ══ -->
+  <div data-screen-label="Menu bar" style="height:34px;background:var(--menubar);backdrop-filter:blur(20px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 14px;color:var(--menuink);font-size:13px;position:relative;z-index:40">
+    <div style="display:flex;align-items:center;gap:16px;font-weight:600"><span style="font-size:15px"></span><span>Finder</span><span style="font-weight:400;color:var(--ink2)">File</span><span style="font-weight:400;color:var(--ink2)">Edit</span></div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <button onClick="{{ toggleWindow }}" onContextMenu="{{ openCtx }}" title="Dev Pilot Board — click to toggle, right-click for menu" style="display:flex;align-items:center;gap:6px;background:{{ trayBg }};border:none;border-radius:6px;padding:3px 8px;cursor:pointer;color:var(--menuink);font:600 12px 'Geist Mono',monospace" style-hover="background:var(--sel)">
+        <span style="width:10px;height:10px;border-radius:3px;background:var(--accent);display:inline-block"></span>
+        <sc-if value="{{ trayGlyph }}" hint-placeholder-val="{{ false }}"><span style="animation:pulseDot 1.6s infinite">{{ trayGlyph }}</span></sc-if>
+      </button>
+      <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink2)">{{ clock }}</span>
+    </div>
+  </div>
+  <!-- tray context menu -->
+  <sc-if value="{{ ctxOpen }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="Tray menu" style="position:absolute;top:38px;right:64px;z-index:60;background:var(--win);border:1px solid var(--winline);border-radius:10px;box-shadow:var(--shadow);padding:5px;min-width:180px;animation:popIn .12s ease-out">
+      <button onClick="{{ ctxOpenDash }}" style="display:block;width:100%;text-align:left;background:none;border:none;border-radius:6px;padding:7px 10px;font:500 13px 'Outfit';color:var(--ink);cursor:pointer" style-hover="background:var(--accent);color:var(--accentInk)">Open Dashboard</button>
+      <button onClick="{{ ctxQuit }}" style="display:block;width:100%;text-align:left;background:none;border:none;border-radius:6px;padding:7px 10px;font:500 13px 'Outfit';color:var(--ink);cursor:pointer" style-hover="background:var(--accent);color:var(--accentInk)">Quit Dev Pilot Board</button>
+    </div>
+  </sc-if>
+  <!-- notification banner -->
+  <sc-if value="{{ banner }}" hint-placeholder-val="{{ false }}">
+    <div data-screen-label="Notification banner" style="position:absolute;top:44px;right:16px;z-index:70;width:330px;background:var(--win);border:1px solid var(--winline);border-radius:14px;box-shadow:var(--shadow);padding:11px 14px;display:flex;gap:11px;align-items:flex-start;animation:bannerIn .28s cubic-bezier(.2,.9,.3,1)">
+      <div style="width:36px;height:36px;border-radius:9px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrink:0">{{ banner.icon }}</div>
+      <div style="min-width:0">
+        <div style="font-weight:600;font-size:13px">{{ banner.title }}</div>
+        <div style="font-size:12.5px;color:var(--ink2);margin-top:1px">{{ banner.body }}</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="flex:1;display:flex;align-items:flex-start;justify-content:center;gap:36px;padding:26px 20px 40px;flex-wrap:wrap">
+    <!-- ══ Popover window ══ -->
+    <sc-if value="{{ windowOpen }}" hint-placeholder-val="{{ true }}">
+      <div style="width:404px;max-width:100%;background:var(--win);backdrop-filter:blur(30px);border:1px solid var(--winline);border-radius:18px;box-shadow:var(--shadow);overflow:hidden;position:relative;animation:popIn .18s ease-out">
+        <!-- header -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 18px 12px">
+          <div style="display:flex;align-items:center;gap:9px">
+            <span style="width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#1d9d74);display:flex;align-items:center;justify-content:center;font-size:14px">🛩️</span>
+            <span style="font-weight:700;font-size:16px;letter-spacing:-.01em">Dev Pilot Board</span>
+          </div>
+          <div style="display:flex;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:3px;gap:2px">
+            <button onClick="{{ goSessions }}" style="border:none;border-radius:6px;padding:5px 12px;font:600 12.5px 'Outfit';cursor:pointer;background:{{ tabSessBg }};color:{{ tabSessInk }}">Sessions</button>
+            <button onClick="{{ goSettings }}" style="border:none;border-radius:6px;padding:5px 12px;font:600 12.5px 'Outfit';cursor:pointer;background:{{ tabSetBg }};color:{{ tabSetInk }}">Settings</button>
+          </div>
+        </div>
+
+        <!-- ══ Sessions tab ══ -->
+        <sc-if value="{{ showSessions }}" hint-placeholder-val="{{ true }}">
+          <div data-screen-label="Sessions" style="padding:2px 14px 14px;max-height:540px;overflow-y:auto">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 4px 8px">
+              <span style="font:600 11px 'Geist Mono',monospace;letter-spacing:.12em;color:var(--ink3)">ACTIVE SESSIONS</span>
+              <span style="font:500 11px 'Geist Mono',monospace;color:var(--ink3)">{{ sessionCount }}</span>
+            </div>
+            <sc-if value="{{ hasSessions }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ sessionRows }}" as="s" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:11px;background:var(--card);border:1px solid {{ s.border }};border-radius:12px;padding:11px 13px;animation:fadeUp .25s ease-out">
+                    <span style="font-size:15px;flex-shrink:0" title="{{ s.statusLabel }}">{{ s.emoji }}</span>
+                    <div style="flex:1;min-width:0">
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span style="font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.project }}</span>
+                        <span style="font:600 9.5px 'Geist Mono',monospace;letter-spacing:.08em;background:{{ s.badgeBg }};color:{{ s.badgeInk }};border-radius:4px;padding:2px 6px;flex-shrink:0">{{ s.badge }}</span>
+                      </div>
+                      <div style="font-size:12px;color:var(--ink2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.msg }}</div>
+                    </div>
+                    <span style="font:500 11px 'Geist Mono',monospace;color:var(--ink3);flex-shrink:0">{{ s.ago }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ noSessions }}" hint-placeholder-val="{{ false }}">
+              <div data-screen-label="Empty state" style="text-align:center;padding:36px 20px 32px;animation:fadeUp .25s ease-out">
+                <div style="width:56px;height:56px;margin:0 auto 14px;border-radius:16px;background:var(--card);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px">🛩️</div>
+                <div style="font-weight:600;font-size:15px">All quiet</div>
+                <div style="font-size:12.5px;color:var(--ink2);margin-top:4px;line-height:1.5">No active agent sessions. Start Claude Code or<br>Copilot CLI and sessions appear here automatically.</div>
+              </div>
+            </sc-if>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 4px 8px">
+              <span style="font:600 11px 'Geist Mono',monospace;letter-spacing:.12em;color:var(--ink3)">RECENT EVENTS</span>
+            </div>
+            <sc-if value="{{ hasFeed }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column">
+                <sc-for list="{{ feedRows }}" as="e" hint-placeholder-count="6">
+                  <div style="display:flex;align-items:center;gap:9px;padding:6.5px 4px;border-bottom:1px solid var(--line)">
+                    <span style="font-size:11px;flex-shrink:0">{{ e.emoji }}</span>
+                    <span style="font-weight:600;font-size:12px;flex-shrink:0">{{ e.project }}</span>
+                    <span style="font:600 9px 'Geist Mono',monospace;letter-spacing:.08em;background:{{ e.badgeBg }};color:{{ e.badgeInk }};border-radius:4px;padding:1.5px 5px;flex-shrink:0">{{ e.badge }}</span>
+                    <span style="font-size:12px;color:var(--ink2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ e.label }}</span>
+                    <span style="font:500 10.5px 'Geist Mono',monospace;color:var(--ink3);flex-shrink:0">{{ e.ago }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ noFeed }}" hint-placeholder-val="{{ false }}">
+              <div style="font-size:12.5px;color:var(--ink3);padding:10px 4px">No events yet.</div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- ══ Settings tab ══ -->
+        <sc-if value="{{ showSettings }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="Settings" style="padding:2px 14px 14px;max-height:540px;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
+            <div style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 13px">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line)">
+                <span style="font-size:13.5px;font-weight:500">✳️&nbsp; Mute Claude notifications</span>
+                <button onClick="{{ toggleMuteClaude }}" role="switch" style="width:38px;height:22px;border-radius:11px;border:none;cursor:pointer;background:{{ muteClaudeBg }};position:relative;transition:background .15s"><span style="position:absolute;top:2px;left:{{ muteClaudeKnob }};width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:left .15s"></span></button>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0">
+                <span style="font-size:13.5px;font-weight:500">🤖&nbsp; Mute Copilot notifications</span>
+                <button onClick="{{ toggleMuteCopilot }}" role="switch" style="width:38px;height:22px;border-radius:11px;border:none;cursor:pointer;background:{{ muteCopilotBg }};position:relative;transition:background .15s"><span style="position:absolute;top:2px;left:{{ muteCopilotKnob }};width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:left .15s"></span></button>
+              </div>
+            </div>
+            <div data-screen-label="Quiet hours" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 13px">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0">
+                <span style="font-size:13.5px;font-weight:500">🌙&nbsp; Quiet hours <span style="color:var(--ink3);font-weight:400;font-size:12px">no sounds, banners still shown</span></span>
+                <button onClick="{{ toggleQuiet }}" role="switch" style="width:38px;height:22px;border-radius:11px;border:none;cursor:pointer;background:{{ quietBg }};position:relative;transition:background .15s"><span style="position:absolute;top:2px;left:{{ quietKnob }};width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:left .15s"></span></button>
+              </div>
+              <sc-if value="{{ quietOn }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:10px;padding:2px 0 12px;animation:fadeUp .2s ease-out">
+                  <span style="font:500 11px 'Geist Mono',monospace;color:var(--ink3)">FROM</span>
+                  <select value="{{ quietFrom }}" onChange="{{ setQuietFrom }}" style="flex:1;background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:500 12.5px 'Geist Mono',monospace;cursor:pointer">
+                    <sc-for list="{{ timeOpts }}" as="t" hint-placeholder-count="4"><option value="{{ t.v }}">{{ t.label }}</option></sc-for>
+                  </select>
+                  <span style="font:500 11px 'Geist Mono',monospace;color:var(--ink3)">TO</span>
+                  <select value="{{ quietTo }}" onChange="{{ setQuietTo }}" style="flex:1;background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:500 12.5px 'Geist Mono',monospace;cursor:pointer">
+                    <sc-for list="{{ timeOpts }}" as="t" hint-placeholder-count="4"><option value="{{ t.v }}">{{ t.label }}</option></sc-for>
+                  </select>
+                </div>
+                <div style="font-size:11.5px;color:var(--ink3);padding-bottom:11px;margin-top:-6px">{{ quietSummary }}</div>
+              </sc-if>
+            </div>
+            <div style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 13px 8px">
+              <div style="display:grid;grid-template-columns:1fr 44px 48px 104px 30px;align-items:center;gap:6px;padding-bottom:7px">
+                <span style="font:600 10.5px 'Geist Mono',monospace;letter-spacing:.12em;color:var(--ink3)">EVENTS</span>
+                <span style="font:600 9.5px 'Geist Mono',monospace;letter-spacing:.08em;color:var(--ink3);text-align:center">SOUND</span>
+                <span style="font:600 9.5px 'Geist Mono',monospace;letter-spacing:.08em;color:var(--ink3);text-align:center">BANNER</span>
+                <span style="font:600 9.5px 'Geist Mono',monospace;letter-spacing:.08em;color:var(--ink3)">TONE</span>
+                <span></span>
+              </div>
+              <sc-for list="{{ eventRows }}" as="ev" hint-placeholder-count="7">
+                <div style="display:grid;grid-template-columns:1fr 44px 48px 104px 30px;align-items:center;gap:6px;padding:6px 0;border-top:1px solid var(--line)">
+                  <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ ev.emoji }}&nbsp; {{ ev.label }}</span>
+                  <button onClick="{{ ev.toggleSound }}" title="Sound" style="width:20px;height:20px;justify-self:center;border-radius:6px;border:1px solid var(--line);cursor:pointer;background:{{ ev.soundBg }};color:{{ ev.markInk }};font:700 11px 'Outfit';display:flex;align-items:center;justify-content:center">{{ ev.soundMark }}</button>
+                  <button onClick="{{ ev.toggleBanner }}" title="Banner" style="width:20px;height:20px;justify-self:center;border-radius:6px;border:1px solid var(--line);cursor:pointer;background:{{ ev.bannerBg }};color:{{ ev.markInk }};font:700 11px 'Outfit';display:flex;align-items:center;justify-content:center">{{ ev.bannerMark }}</button>
+                  <select value="{{ ev.tone }}" onChange="{{ ev.setTone }}" style="background:var(--card2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:4px 5px;font:500 11.5px 'Geist Mono',monospace;cursor:pointer;width:100%">
+                    <sc-for list="{{ tones }}" as="t" hint-placeholder-count="4"><option value="{{ t }}">{{ t }}</option></sc-for>
+                  </select>
+                  <button onClick="{{ ev.preview }}" title="Preview tone" style="width:24px;height:24px;justify-self:center;border-radius:7px;border:1px solid var(--line);background:var(--card2);color:var(--ink2);cursor:pointer;font-size:9px;display:flex;align-items:center;justify-content:center" style-hover="color:var(--accent);border-color:var(--accent)">▶</button>
+                </div>
+              </sc-for>
+            </div>
+            <div style="font-size:11.5px;color:var(--ink3);text-align:center;padding:2px 8px 4px;line-height:1.5">Changes save automatically and apply to the next notification — no restart needed.</div>
+          </div>
+        </sc-if>
+
+        <!-- ══ Onboarding overlay ══ -->
+        <sc-if value="{{ showOnboard }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="Onboarding" style="position:absolute;inset:0;background:var(--win);backdrop-filter:blur(8px);z-index:20;display:flex;flex-direction:column;padding:28px 26px 22px;animation:popIn .2s ease-out">
+            <sc-if value="{{ ob1 }}" hint-placeholder-val="{{ false }}">
+              <div style="flex:1;display:flex;flex-direction:column;justify-content:center;text-align:center;animation:fadeUp .25s ease-out">
+                <div style="width:68px;height:68px;margin:0 auto 18px;border-radius:20px;background:linear-gradient(135deg,var(--accent),#1d9d74);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 12px 30px rgba(20,160,110,.35)">🛩️</div>
+                <div style="font-weight:700;font-size:21px;letter-spacing:-.01em">Never miss your agent again</div>
+                <div style="font-size:13.5px;color:var(--ink2);line-height:1.6;margin-top:10px;max-width:300px;align-self:center">Dev Pilot Board watches your Claude Code and Copilot CLI sessions and pings you — with a sound and a banner — the moment one finishes or is blocked waiting for you.</div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ ob2 }}" hint-placeholder-val="{{ false }}">
+              <div style="flex:1;display:flex;flex-direction:column;justify-content:center;animation:fadeUp .25s ease-out">
+                <div style="font-weight:700;font-size:19px;letter-spacing:-.01em">Connect your agents</div>
+                <div style="font-size:13px;color:var(--ink2);margin-top:6px;line-height:1.55">One command registers the notification hooks for both tools. Everything stays local — no network, no accounts.</div>
+                <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
+                  <div style="display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px"><span>✳️</span><div><div style="font-weight:600;font-size:13px">Claude Code</div><div style="font:400 11px 'Geist Mono',monospace;color:var(--ink3)">~/.claude/settings.json</div></div></div>
+                  <div style="display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px"><span>🤖</span><div><div style="font-weight:600;font-size:13px">Copilot CLI</div><div style="font:400 11px 'Geist Mono',monospace;color:var(--ink3)">~/.copilot/hooks/notify.json</div></div></div>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:14px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 12px">
+                  <code style="flex:1;font:500 12px 'Geist Mono',monospace;color:var(--ink)">./notify.sh --install</code>
+                  <button onClick="{{ copyCmd }}" style="border:none;border-radius:7px;padding:5px 10px;background:var(--accent);color:var(--accentInk);font:600 11px 'Outfit';cursor:pointer">{{ copyLabel }}</button>
+                </div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ ob3 }}" hint-placeholder-val="{{ false }}">
+              <div style="flex:1;display:flex;flex-direction:column;justify-content:center;text-align:center;animation:fadeUp .25s ease-out">
+                <div style="font-weight:700;font-size:19px;letter-spacing:-.01em">Hear it once</div>
+                <div style="font-size:13px;color:var(--ink2);margin-top:6px;line-height:1.55;max-width:290px;align-self:center">Each event has its own tone so you learn them by ear. Try the default "waiting for you" ping:</div>
+                <button onClick="{{ testNotify }}" style="margin:18px auto 0;border:none;border-radius:11px;padding:11px 20px;background:var(--card2);border:1px solid var(--line);color:var(--ink);font:600 13.5px 'Outfit';cursor:pointer;display:flex;align-items:center;gap:8px" style-hover="border-color:var(--accent)">🔔 Play test notification</button>
+                <div style="font-size:11.5px;color:var(--ink3);margin-top:12px">You can retune every event in Settings.</div>
+              </div>
+            </sc-if>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:18px">
+              <div style="display:flex;gap:6px">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ dot1 }}"></span>
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ dot2 }}"></span>
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ dot3 }}"></span>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button onClick="{{ skipOnboard }}" style="border:none;background:none;color:var(--ink3);font:500 13px 'Outfit';cursor:pointer;padding:8px 10px">Skip</button>
+                <button onClick="{{ nextOnboard }}" style="border:none;border-radius:9px;padding:8px 18px;background:var(--accent);color:var(--accentInk);font:600 13px 'Outfit';cursor:pointer">{{ obNextLabel }}</button>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+    <sc-if value="{{ windowClosed }}" hint-placeholder-val="{{ false }}">
+      <div style="width:404px;max-width:100%;text-align:center;padding:60px 20px;color:var(--ink2);font-size:13.5px;animation:fadeUp .2s">Dashboard hidden — Dev Pilot Board keeps running in the menu bar.<br><span style="color:var(--ink3);font-size:12.5px">Click the <span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--accent)"></span> tray icon above to reopen.</span></div>
+    </sc-if>
+
+    <!-- ══ Demo rail ══ -->
+    <sc-if value="{{ showRail }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Demo controls" style="width:220px;flex-shrink:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:8px">
+        <div style="font:600 10.5px 'Geist Mono',monospace;letter-spacing:.14em;color:var(--ink3);padding-bottom:2px">DEMO · SIMULATE</div>
+        <sc-for list="{{ demoBtns }}" as="b" hint-placeholder-count="6">
+          <button onClick="{{ b.onClick }}" style="text-align:left;border:1px solid var(--line);border-radius:9px;padding:8px 11px;background:var(--card);color:var(--ink);font:500 12.5px 'Outfit';cursor:pointer" style-hover="border-color:var(--accent);background:var(--card2)">{{ b.label }}</button>
+        </sc-for>
+        <div style="font:600 10.5px 'Geist Mono',monospace;letter-spacing:.14em;color:var(--ink3);padding:8px 0 2px">THEME</div>
+        <div style="display:flex;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:3px;gap:2px">
+          <button onClick="{{ setDark }}" style="flex:1;border:none;border-radius:6px;padding:5px 0;font:600 12px 'Outfit';cursor:pointer;background:{{ darkBtnBg }};color:{{ darkBtnInk }}">Dark</button>
+          <button onClick="{{ setLight }}" style="flex:1;border:none;border-radius:6px;padding:5px 0;font:600 12px 'Outfit';cursor:pointer;background:{{ lightBtnBg }};color:{{ lightBtnInk }}">Light</button>
+        </div>
+        <div style="font:600 10.5px 'Geist Mono',monospace;letter-spacing:.14em;color:var(--ink3);padding:8px 0 2px">TRAY GLYPH</div>
+        <div style="font-size:11.5px;color:var(--ink2);line-height:1.7">? question &nbsp;·&nbsp; ! waiting<br>… working &nbsp;·&nbsp; (none) idle<br><span style="color:var(--ink3)">Now: <span style="font-family:'Geist Mono',monospace;color:var(--accent)">{{ trayGlyphLabel }}</span></span></div>
+      </div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:&quot;760px&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#34d399&quot;,&quot;#7c6cf6&quot;,&quot;#4f9cf9&quot;,&quot;#f59e0b&quot;]},&quot;showDemoRail&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;}}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    const now = Date.now(), m = 60000;
+    this.state = {
+      theme: 'dark', tab: 'sessions', windowOpen: true, ctxOpen: false,
+      onboardStep: 1, onboarded: false, copied: false,
+      banner: null, now,
+      muteClaude: false, muteCopilot: false,
+      quiet: false, quietFrom: '22:00', quietTo: '07:00',
+      evCfg: {
+        stop:     { emoji: '⚪', label: 'Done responding',      sound: true, banner: true,  tone: 'Blow' },
+        waiting:  { emoji: '🟡', label: 'Waiting for you',      sound: true, banner: true,  tone: 'Ping' },
+        question: { emoji: '❓', label: 'Question asked',       sound: true, banner: true,  tone: 'Hero' },
+        failure:  { emoji: '🔴', label: 'Tool call failed',     sound: true, banner: true,  tone: 'Basso' },
+        taskdone: { emoji: '🧰', label: 'Background task done', sound: true, banner: true,  tone: 'Submarine' },
+        compact:  { emoji: '🌀', label: 'Context compacting',   sound: true, banner: false, tone: 'Purr' },
+        start:    { emoji: '🚀', label: 'Session started',      sound: true, banner: false, tone: 'Pop' }
+      },
+      sessions: [
+        { id: 1, project: 'claude-notify', source: 'claude',  status: 'waiting', msg: 'Claude is waiting for your input', t: now - 8*m },
+        { id: 2, project: 'momentumx3',    source: 'claude',  status: 'question', msg: 'Allow edit to src/lib.rs?',       t: now - 39*m },
+        { id: 3, project: 'bot-crossing',  source: 'copilot', status: 'done',    msg: 'Done',                             t: now - 8*m }
+      ],
+      feed: [
+        { emoji: '⚪', project: 'bot-crossing', source: 'copilot', label: 'stop',  t: now - 8*m },
+        { emoji: '🟡', project: 'claude-notify', source: 'claude', label: 'Claude is waiting for your input', t: now - 8*m },
+        { emoji: '❓', project: 'momentumx3',   source: 'claude',  label: 'question', t: now - 22*m },
+        { emoji: '⚪', project: 'app',          source: 'claude',  label: 'stop',  t: now - 23*m },
+        { emoji: '⚪', project: 'bot-crossing', source: 'copilot', label: 'stop',  t: now - 26*m },
+        { emoji: '🚀', project: 'app',          source: 'claude',  label: 'session started', t: now - 41*m }
+      ]
+    };
+    this._nid = 4;
+  }
+  componentDidMount() { this._tick = setInterval(() => this.setState({ now: Date.now() }), 5000); }
+  componentWillUnmount() { clearInterval(this._tick); clearTimeout(this._bt); }
+
+  ago(t) {
+    const s = Math.max(0, (this.state.now - t) / 1000);
+    if (s < 60) return 'now';
+    if (s < 3600) return Math.floor(s/60) + 'm ago';
+    return Math.floor(s/3600) + 'h ago';
+  }
+  playTone(name) {
+    if (this.state.quiet) return;
+    const f = { Basso:110, Blow:520, Bottle:660, Frog:300, Funk:200, Glass:880, Hero:440, Morse:700, Ping:990, Pop:350, Purr:170, Sosumi:620, Submarine:230, Tink:1320 }[name] || 500;
+    try {
+      this._ac = this._ac || new (window.AudioContext || window.webkitAudioContext)();
+      const ac = this._ac, o = ac.createOscillator(), g = ac.createGain();
+      o.type = name === 'Basso' || name === 'Submarine' ? 'sawtooth' : 'sine';
+      o.frequency.value = f; o.connect(g); g.connect(ac.destination);
+      g.gain.setValueAtTime(0.16, ac.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.45);
+      if (name === 'Hero') o.frequency.setValueAtTime(f * 1.5, ac.currentTime + 0.14);
+      o.start(); o.stop(ac.currentTime + 0.5);
+    } catch (e) {}
+  }
+  showBanner(icon, title, body) {
+    clearTimeout(this._bt);
+    this.setState({ banner: { icon, title, body } });
+    this._bt = setTimeout(() => this.setState({ banner: null }), 4200);
+  }
+  fire(type, sessionId) {
+    const st = this.state, now = Date.now();
+    const map = { question: { status:'question', emoji:'❓', msg:'Allow edit to src/main.rs?' },
+                  waiting:  { status:'waiting',  emoji:'🟡', msg:'Claude is waiting for your input' },
+                  stop:     { status:'done',     emoji:'⚪', msg:'Done' },
+                  failure:  { status:'working',  emoji:'🔴', msg:'Tool call failed: cargo build' },
+                  start:    { status:'working',  emoji:'🚀', msg:'Session started' } };
+    const d = map[type];
+    let sessions = st.sessions.slice();
+    let sess;
+    if (type === 'start') {
+      sess = { id: this._nid++, project: ['warp-lane','tidepool','hexgrid'][Math.floor(Math.random()*3)], source: Math.random() < 0.5 ? 'claude' : 'copilot', status: 'working', msg: 'Working…', t: now };
+      sessions.unshift(sess);
+    } else {
+      sess = sessions[0] || { id: this._nid++, project: 'claude-notify', source: 'claude', t: now };
+      if (!sessions.length) sessions = [sess];
+      sess = Object.assign({}, sess, { status: d.status, msg: d.msg, t: now });
+      sessions = sessions.map((s, i) => i === 0 ? sess : s);
+    }
+    const feed = [{ emoji: d.emoji, project: sess.project, source: sess.source, label: type === 'waiting' ? d.msg : type === 'question' ? 'question' : type, t: now }].concat(st.feed).slice(0, 25);
+    this.setState({ sessions, feed });
+    const muted = sess.source === 'claude' ? st.muteClaude : st.muteCopilot;
+    const cfgKey = { stop:'stop', waiting:'waiting', question:'question', failure:'failure', start:'start' }[type];
+    const cfg = st.evCfg[cfgKey];
+    if (!muted) {
+      if (cfg.sound) this.playTone(cfg.tone);
+      if (cfg.banner) this.showBanner(sess.source === 'claude' ? '✳️' : '🤖', (sess.source === 'claude' ? 'Claude Code' : 'GitHub Copilot') + ' — ' + sess.project, d.msg);
+    }
+  }
+  fmt12(v) { const [h, mm] = v.split(':').map(Number); const ap = h >= 12 ? 'PM' : 'AM'; const h12 = h % 12 || 12; return h12 + ':' + String(mm).padStart(2,'0') + ' ' + ap; }
+
+  renderVals() {
+    const st = this.state, S = this.setState.bind(this);
+    const on = 'var(--accent)', off = 'var(--toggleOff)';
+    const badge = src => src === 'claude'
+      ? { badge: 'CLAUDE', badgeBg: st.theme === 'dark' ? 'rgba(124,108,246,.25)' : 'rgba(124,108,246,.16)', badgeInk: st.theme === 'dark' ? '#c4b9ff' : '#5b4bd6' }
+      : { badge: 'COPILOT', badgeBg: st.theme === 'dark' ? 'rgba(79,156,249,.22)' : 'rgba(79,156,249,.16)', badgeInk: st.theme === 'dark' ? '#a9cdff' : '#1e6fd9' };
+    const sEmoji = { question: '❓', waiting: '🟡', working: '🟢', done: '⚪' };
+    const sBorder = { question: 'var(--qBorder)', waiting: 'var(--warnBorder)', working: 'var(--line)', done: 'var(--line)' };
+    const sLabel = { question: 'Needs an answer', waiting: 'Waiting for input', working: 'Working', done: 'Idle' };
+    const glyph = st.sessions.some(s => s.status === 'question') ? '?'
+      : st.sessions.some(s => s.status === 'waiting') ? '!'
+      : st.sessions.some(s => s.status === 'working') ? '…' : '';
+    const tones = ['Basso','Blow','Bottle','Frog','Funk','Glass','Hero','Morse','Ping','Pop','Purr','Sosumi','Submarine','Tink'];
+    const timeOpts = [];
+    for (let h = 0; h < 24; h++) for (const mm of ['00','30']) { const v = String(h).padStart(2,'0') + ':' + mm; timeOpts.push({ v, label: this.fmt12(v) }); }
+    const eventRows = Object.keys(st.evCfg).map(k => {
+      const e = st.evCfg[k];
+      const set = patch => S(s => ({ evCfg: Object.assign({}, s.evCfg, { [k]: Object.assign({}, s.evCfg[k], patch) }) }));
+      return {
+        emoji: e.emoji, label: e.label, tone: e.tone,
+        soundBg: e.sound ? on : 'transparent', bannerBg: e.banner ? on : 'transparent',
+        soundMark: e.sound ? '✓' : '', bannerMark: e.banner ? '✓' : '', markInk: 'var(--accentInk)',
+        toggleSound: () => set({ sound: !e.sound }), toggleBanner: () => set({ banner: !e.banner }),
+        setTone: ev => { set({ tone: ev.target.value }); this.playTone(ev.target.value); },
+        preview: () => this.playTone(e.tone)
+      };
+    });
+    const knob = v => v ? '18px' : '2px';
+    const tabOn = { bg: 'var(--accent)', ink: 'var(--accentInk)' }, tabOff = { bg: 'transparent', ink: 'var(--ink2)' };
+    return {
+      theme: st.theme, clock: 'Tue Sep 22  9:41 AM',
+      rootRef: el => { this._root = el; if (el) el.style.setProperty('--accent', this.props.accent ?? (st.theme === 'dark' ? '#34d399' : '#0d9d6d')); },
+      trayGlyph: glyph, trayGlyphLabel: glyph || '(none)',
+      trayBg: st.windowOpen ? 'var(--sel)' : 'transparent',
+      toggleWindow: () => S(s => ({ windowOpen: !s.windowOpen, ctxOpen: false })),
+      openCtx: e => { e.preventDefault(); S(s => ({ ctxOpen: !s.ctxOpen })); },
+      ctxOpen: st.ctxOpen,
+      ctxOpenDash: () => S({ windowOpen: true, ctxOpen: false }),
+      ctxQuit: () => S({ windowOpen: false, ctxOpen: false }),
+      windowOpen: st.windowOpen, windowClosed: !st.windowOpen,
+      banner: st.banner,
+      goSessions: () => S({ tab: 'sessions' }), goSettings: () => S({ tab: 'settings' }),
+      showSessions: st.tab === 'sessions', showSettings: st.tab === 'settings',
+      tabSessBg: (st.tab === 'sessions' ? tabOn : tabOff).bg, tabSessInk: (st.tab === 'sessions' ? tabOn : tabOff).ink,
+      tabSetBg: (st.tab === 'settings' ? tabOn : tabOff).bg, tabSetInk: (st.tab === 'settings' ? tabOn : tabOff).ink,
+      sessionCount: st.sessions.length + (st.sessions.length === 1 ? ' session' : ' sessions'),
+      hasSessions: st.sessions.length > 0, noSessions: st.sessions.length === 0,
+      sessionRows: st.sessions.map(s => Object.assign({
+        project: s.project, msg: s.msg, ago: this.ago(s.t),
+        emoji: sEmoji[s.status], border: sBorder[s.status], statusLabel: sLabel[s.status]
+      }, badge(s.source))),
+      hasFeed: st.feed.length > 0, noFeed: st.feed.length === 0,
+      feedRows: st.feed.map(e => Object.assign({ emoji: e.emoji, project: e.project, label: e.label, ago: this.ago(e.t) }, badge(e.source))),
+      muteClaudeBg: st.muteClaude ? on : off, muteClaudeKnob: knob(st.muteClaude),
+      muteCopilotBg: st.muteCopilot ? on : off, muteCopilotKnob: knob(st.muteCopilot),
+      toggleMuteClaude: () => S(s => ({ muteClaude: !s.muteClaude })),
+      toggleMuteCopilot: () => S(s => ({ muteCopilot: !s.muteCopilot })),
+      quietBg: st.quiet ? on : off, quietKnob: knob(st.quiet), quietOn: st.quiet,
+      toggleQuiet: () => S(s => ({ quiet: !s.quiet })),
+      quietFrom: st.quietFrom, quietTo: st.quietTo, timeOpts,
+      setQuietFrom: e => S({ quietFrom: e.target.value }), setQuietTo: e => S({ quietTo: e.target.value }),
+      quietSummary: 'Sounds off ' + this.fmt12(st.quietFrom) + ' → ' + this.fmt12(st.quietTo) + (st.quietFrom > st.quietTo ? ' (overnight)' : '') + '. Banners still shown.',
+      eventRows, tones,
+      showOnboard: !st.onboarded && st.windowOpen,
+      ob1: st.onboardStep === 1, ob2: st.onboardStep === 2, ob3: st.onboardStep === 3,
+      dot1: st.onboardStep >= 1 ? on : off, dot2: st.onboardStep >= 2 ? on : off, dot3: st.onboardStep >= 3 ? on : off,
+      obNextLabel: st.onboardStep === 3 ? 'Start using' : 'Continue',
+      nextOnboard: () => S(s => s.onboardStep === 3 ? { onboarded: true } : { onboardStep: s.onboardStep + 1 }),
+      skipOnboard: () => S({ onboarded: true }),
+      copyLabel: st.copied ? 'Copied!' : 'Copy',
+      copyCmd: () => { try { navigator.clipboard.writeText('./notify.sh --install'); } catch (e) {} S({ copied: true }); setTimeout(() => this.setState({ copied: false }), 1500); },
+      testNotify: () => { this.playTone('Ping'); this.showBanner('✳️', 'Claude Code — demo', 'Claude is waiting for your input'); },
+      showRail: this.props.showDemoRail ?? true,
+      demoBtns: [
+        { label: '❓  Agent asks a question', onClick: () => this.fire('question') },
+        { label: '🟡  Waiting for input', onClick: () => this.fire('waiting') },
+        { label: '⚪  Done responding', onClick: () => this.fire('stop') },
+        { label: '🔴  Tool call fails', onClick: () => this.fire('failure') },
+        { label: '🚀  New session starts', onClick: () => this.fire('start') },
+        { label: '🧹  Clear all sessions', onClick: () => S({ sessions: [] }) },
+        { label: '🎓  Replay onboarding', onClick: () => S({ onboarded: false, onboardStep: 1, windowOpen: true }) }
+      ],
+      setDark: () => S({ theme: 'dark' }), setLight: () => S({ theme: 'light' }),
+      darkBtnBg: st.theme === 'dark' ? on : 'transparent', darkBtnInk: st.theme === 'dark' ? 'var(--accentInk)' : 'var(--ink2)',
+      lightBtnBg: st.theme === 'light' ? on : 'transparent', lightBtnInk: st.theme === 'light' ? 'var(--accentInk)' : 'var(--ink2)'
+    };
+  }
+}
+</script>
+</body>
+</html>

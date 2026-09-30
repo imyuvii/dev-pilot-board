@@ -161,6 +161,17 @@ dashboard as fake sessions:
   change to `LADDER`/`standing_of` in `led.rs` plus `LED_EVENTS` in `led.ts` — never a
   reflash. An unknown pattern name just earns
   an `ERR unknown mode` and leaves the ring as it was.
+- **Pin the code-signing identifier, or macOS permissions evaporate.** TCC keys
+  Bluetooth and Local Network grants to the signing *identifier*. Tauri's ad-hoc signature
+  uses `app-<hash of the binary>`, which changes on every rebuild, so each build is a new
+  app to macOS: the grant is lost and no prompt reappears — Bluetooth sits at
+  `NotDetermined` and `Manager::new()` times out waiting for a state callback that never
+  comes. Proven 2026-09-30: the identical release binary worked when exec'd from Terminal
+  (it inherits Terminal's grant) and never worked via `open`, until it was re-signed with
+  an identifier that already held a grant, whereupon it connected instantly.
+  `scripts/build-release.sh` now re-signs every build with the bundle id and verifies it.
+  A first grant still needs one user click on the prompt, which only appears while the app
+  keeps running — do not kill it a few seconds after launch while testing.
 - **Bluetooth LE is the third transport** (`src-tauri/src/ble.rs`, btleplug over
   CoreBluetooth). The ring advertises the Nordic UART Service as "LED Ring"; no OS pairing,
   no PIN — scan for the service UUID, connect, same line protocol. `led.rs` wraps it as

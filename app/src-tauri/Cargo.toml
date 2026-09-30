@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.4.0"
+version = "0.4.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -35,7 +35,9 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 btleplug = "0.13"
 futures = "0.3"
 uuid = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt", "rt-multi-thread"] }
+# For CBCentralManager.authorization — tells the user *why* Bluetooth failed.
+objc2 = "0.6"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -45,3 +47,4 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+

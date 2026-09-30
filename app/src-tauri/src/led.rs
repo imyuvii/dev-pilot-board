@@ -1395,6 +1395,22 @@ fn run() {
             continue;
         };
 
+        // The user picked a specific link and we are on a different one
+        // (the setting changed while connected): let go, reconnect on theirs.
+        if let Some(c) = conn.as_ref() {
+            let want = target.transport.as_str();
+            if want != "auto" && want != c.label() {
+                dbg(&format!("link setting is now {want}, dropping {}", c.label()));
+                blank(&mut conn);
+                sent = None;
+                ring = None;
+                ring_ours = false;
+                yielding = false;
+                next_try = Instant::now();
+                set_status(false, "", "Switching link — will reconnect");
+            }
+        }
+
         // Sitting on serial in auto mode: keep an eye out for the ring turning
         // up on the network, and hand the USB port back when it does.
         if conn.as_ref().is_some_and(|c| c.is_serial())
@@ -1448,7 +1464,12 @@ fn run() {
                     fails = fails.saturating_add(1);
                     next_try = Instant::now() + backoff(fails);
                     dbg(&format!("no ring found, retry in {:?}", backoff(fails)));
-                    set_status(false, "", "No ring found — will keep looking");
+                    let note = if target.transport == "ble" {
+                        crate::ble::failure_note()
+                    } else {
+                        "No ring found — will keep looking".to_string()
+                    };
+                    set_status(false, "", &note);
                     continue;
                 }
             }

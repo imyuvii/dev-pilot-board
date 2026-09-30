@@ -72,6 +72,16 @@ ARCHS=$(lipo -archs "$BIN")
 if [ "$MODE" = "release" ] && [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
   echo "expected universal binary, got: $ARCHS" >&2; exit 1
 fi
+# macOS keys TCC permissions (Bluetooth, Local Network) to the code-signing
+# IDENTIFIER. Tauri's ad-hoc signature uses "app-<hash of the binary>", so every
+# rebuild looks like a brand-new app, the user's grant is silently lost and
+# macOS does not reliably re-prompt — Bluetooth then sits at NotDetermined
+# forever. Pin it to the bundle id so a grant survives upgrades.
+BUNDLE_ID=$(jq -r '.identifier' "$APP_DIR/src-tauri/tauri.conf.json")
+codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" 2>/dev/null
+SIGNED_AS=$(codesign -dv "$APP_BUNDLE" 2>&1 | sed -n 's/^Identifier=//p')
+[ "$SIGNED_AS" = "$BUNDLE_ID" ] || { echo "signing identifier is $SIGNED_AS, expected $BUNDLE_ID" >&2; exit 1; }
+
 BUNDLE_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist")
 [ "$BUNDLE_VERSION" = "$VERSION" ] || { echo "bundle version $BUNDLE_VERSION != $VERSION" >&2; exit 1; }
 

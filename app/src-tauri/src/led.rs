@@ -1,0 +1,1046 @@
+//! Optional LED ring output for the dashboard.
+//!
+//! The ring (a 16-LED WS2812B on an ESP32, see the led-iot project) speaks one
+//! newline-terminated line protocol over BOTH transports: USB serial at 115200
+//! baud, or a plain WebSocket on port 81. This module is just another client of
+//! that protocol — it never learns anything about events or sources. The
+//! frontend decides what the ring should look like and pushes a `LedState`
+//! down; everything here is transport plumbing.
+//!
+//! Hard requirement: the ring is optional. No board, no network, no serial
+//! permission, a port held by another app — every one of those paths ends in a
+//! quiet retry. Nothing here is allowed to surface an error to the user or to
+//! affect sounds, banners or the dashboard.
+//!
+//! Transport preference is WiFi first. Only one process can hold a USB serial
+//! port, and this app runs all day, so squatting on /dev/cu.usbserial-* would
+//! lock out LED Lab, the Arduino IDE and `arduino-cli upload`. Over WebSocket
+//! several clients coexist, so when WiFi shows up we drop serial and move.
+
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use tungstenite::{Message, WebSocket};
+
+const WS_PORT: u16 = 81;
+const BAUD: u32 = 115_200;
+/// Cap matching LED Lab's own limit: the firmware budgets 5V/700mA for the ring
+/// plus the WiFi radio out of one USB supply, so full brightness browns out.
+const MAX_BRIGHT: u8 = 160;
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(1200);
+/// One loop turn blocks about this long draining inbound frames, which doubles
+/// as the poll interval for target-state changes.
+const DRAIN_WINDOW: Duration = Duration::from_millis(120);
+/// In "auto" mode, how often to re-check WiFi while sitting on serial.
+const WIFI_RECHECK: Duration = Duration::from_secs(15);
+/// How often to ask the ring what it is actually showing, so drift self-heals.
+const RESYNC_PROBE: Duration = Duration::from_secs(5);
+/// Three reconnects inside this window is treated as the ring rebooting.
+const BROWNOUT_WINDOW: Duration = Duration::from_secs(90);
+/// A link this stable earns full brightness back.
+const BROWNOUT_RECOVER: Duration = Duration::from_secs(300);
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LedState {
+    /// "auto" | "wifi" | "usb"
+    pub transport: String,
+    /// mDNS name or IP of the ring, e.g. "ledring.local"
+    pub host: String,
+    /// One of the firmware's effect names. An unknown name makes the firmware
+    /// answer `ERR unknown mode` and keep its current effect, so a typo here
+    /// degrades to "ring doesn't change", never to a broken ring.
+    pub pattern: String,
+    pub color: String,
+    pub color2: String,
+    pub speed: u8,
+    pub bright: u8,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct LedStatus {
+    pub connected: bool,
+    /// "wifi" | "usb" | "" when disconnected
+    pub transport: String,
+    /// Short human-readable line for the settings panel.
+    pub detail: String,
+}
+
+struct Shared {
+    status: Mutex<LedStatus>,
+}
+
+static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static CLEARED: AtomicBool = AtomicBool::new(false);
+
+fn shared() -> &'static Arc<Shared> {
+    SHARED.get_or_init(|| {
+        Arc::new(Shared {
+            status: Mutex::new(LedStatus::default()),
+        })
+    })
+}
+
+#[tauri::command]
+pub fn led_status() -> LedStatus {
+    shared()
+        .status
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+/// Blank the ring on the way out, so quitting the app doesn't leave a stale
+/// colour glowing on the desk. Waits briefly for the worker to confirm.
+pub fn shutdown() {
+    if !SHUTDOWN.swap(true, Ordering::SeqCst) {
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while !CLEARED.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// Diagnostics for the LED path, off unless DPB_LED_DEBUG is set. The ring
+/// failing is never user-visible, so without this there is nothing to look at.
+fn dbg(msg: &str) {
+    if std::env::var_os("DPB_LED_DEBUG").is_some() {
+        eprintln!("[led] {msg}");
+    }
+}
+
+fn set_status(connected: bool, transport: &str, detail: &str) {
+    if let Ok(mut s) = shared().status.lock() {
+        s.connected = connected;
+        s.transport = transport.to_string();
+        s.detail = detail.to_string();
+    }
+}
+
+// ------------------------------------------------------------- what to show
+//
+// This lives in Rust, not in the Vue frontend, for one hard reason: Dev Pilot
+// Board is a menu-bar app whose window is hidden nearly all the time, and WebKit
+// suspends timers in a hidden webview. Driving the ring from the frontend
+// therefore worked for one tick after launch and then silently stopped.
+//
+// KEEP IN SYNC with App.vue: `STATUS_MAP`, the `STATUS_META` ranking and
+// `STALE_MS` are duplicated here. The tests at the bottom of this file pin the
+// ladder; if you change the dashboard's statuses, change both.
+
+const STALE_SECS: i64 = 12 * 60 * 60;
+/// How long a one-off event (failed tool call, task finished…) holds the ring
+/// before it falls back to the session's standing status.
+const TRANSIENT_HOLD_SECS: i64 = 30;
+/// Plenty for the app's own 2000-line log cap, and bounds the per-second read.
+const TAIL_BYTES: u64 = 256 * 1024;
+
+/// One rung of the ladder. Colour, pattern and on/off are user-configurable
+/// per event under `led.events.<event>` — the same shape as sound and banner
+/// — while speed, dim scale and urgency order stay fixed.
+struct Rung {
+    event: &'static str,
+    enabled: bool,
+    color: &'static str,
+    pattern: &'static str,
+    speed: u8,
+    /// Brightness multiplier — resting states sit lower than alerts.
+    scale: f32,
+    /// A transient rung lights up for TRANSIENT_HOLD_SECS after its event and
+    /// then yields; a standing rung reflects a session's current status.
+    transient: bool,
+}
+
+/// Most urgent first. Same order the tray glyph uses, with the one-off events
+/// slotted between "needs you" and "busy". KEEP IN SYNC with `LED_EVENTS` in
+/// src/led.ts (labels + defaults) and `STATUS_MAP` in App.vue (which events
+/// count as which standing status).
+///
+/// The ring is a *notification* light, not a status light: by default it is
+/// dark unless something happened in the last TRANSIENT_HOLD_SECS, or an agent
+/// is waiting on the user / asked a question — those two stay lit until the
+/// user responds, because an unanswered notification is still a notification.
+const LADDER: &[Rung] = &[
+    Rung { event: "question",      enabled: true,  color: "ff00aa", pattern: "breathe", speed: 75, scale: 1.0,  transient: false },
+    Rung { event: "waiting",       enabled: true,  color: "ffb000", pattern: "breathe", speed: 45, scale: 1.0,  transient: false },
+    Rung { event: "failure",       enabled: true,  color: "ff2020", pattern: "solid",   speed: 50, scale: 1.0,  transient: true },
+    Rung { event: "task-done",     enabled: true,  color: "00d8ff", pattern: "sparkle", speed: 60, scale: 1.0,  transient: true },
+    Rung { event: "compact",       enabled: false, color: "9b59b6", pattern: "breathe", speed: 40, scale: 1.0,  transient: true },
+    Rung { event: "session-start", enabled: false, color: "ffffff", pattern: "chase",   speed: 70, scale: 1.0,  transient: true },
+    // `working` is a silent status event in notify.sh, not a notification, so it
+    // is off by default: the ring stays dark while an agent merely works.
+    Rung { event: "working",       enabled: false, color: "1e90ff", pattern: "comet",   speed: 65, scale: 1.0,  transient: false },
+    Rung { event: "stop",          enabled: true,  color: "00ff66", pattern: "solid",   speed: 30, scale: 1.0,  transient: true },
+];
+
+fn rung(event: &str) -> Option<&'static Rung> {
+    LADDER.iter().find(|r| r.event == event)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct EventLook {
+    enabled: bool,
+    color: String,
+    pattern: String,
+}
+
+struct Cfg {
+    enabled: bool,
+    transport: String,
+    host: String,
+    brightness: u8,
+    dim_in_quiet_hours: bool,
+    events: HashMap<String, EventLook>,
+    quiet_enabled: bool,
+    quiet_start: String,
+    quiet_end: String,
+}
+
+impl Default for Cfg {
+    fn default() -> Self {
+        Cfg {
+            // Opt-in: off means we never resolve mDNS or open a serial port.
+            enabled: false,
+            transport: "auto".into(),
+            host: "ledring.local".into(),
+            brightness: 60,
+            dim_in_quiet_hours: true,
+            events: LADDER
+                .iter()
+                .map(|r| {
+                    (
+                        r.event.to_string(),
+                        EventLook {
+                            enabled: r.enabled,
+                            color: r.color.to_string(),
+                            pattern: r.pattern.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            quiet_enabled: false,
+            quiet_start: "22:00".into(),
+            quiet_end: "08:00".into(),
+        }
+    }
+}
+
+fn home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// The colour picker hands us "#rrggbb"; the firmware wants "rrggbb". Anything
+/// that isn't six hex digits is ignored so a bad value can't wedge the ring.
+fn clean_color(s: &str) -> Option<String> {
+    let s = s.trim().trim_start_matches('#').to_ascii_lowercase();
+    (s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit())).then_some(s)
+}
+
+/// Tolerant on purpose: a missing, partial or legacy config yields defaults
+/// rather than disabling the feature in some confusing half-state.
+fn read_cfg() -> Cfg {
+    let mut cfg = Cfg::default();
+    let Ok(text) = std::fs::read_to_string(home().join(".claude/notify-config.json")) else {
+        return cfg;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return cfg;
+    };
+    if let Some(led) = v.get("led") {
+        if let Some(b) = led.get("enabled").and_then(|x| x.as_bool()) {
+            cfg.enabled = b;
+        }
+        if let Some(s) = led.get("transport").and_then(|x| x.as_str()) {
+            cfg.transport = s.to_string();
+        }
+        if let Some(s) = led.get("host").and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                cfg.host = s.trim().to_string();
+            }
+        }
+        if let Some(n) = led.get("brightness").and_then(|x| x.as_u64()) {
+            cfg.brightness = n.min(MAX_BRIGHT as u64) as u8;
+        }
+        if let Some(b) = led.get("dim_in_quiet_hours").and_then(|x| x.as_bool()) {
+            cfg.dim_in_quiet_hours = b;
+        }
+        if let Some(evs) = led.get("events").and_then(|x| x.as_object()) {
+            for (name, look) in cfg.events.iter_mut() {
+                let Some(e) = evs.get(name) else { continue };
+                if let Some(b) = e.get("enabled").and_then(|x| x.as_bool()) {
+                    look.enabled = b;
+                }
+                if let Some(c) = e.get("color").and_then(|x| x.as_str()).and_then(clean_color) {
+                    look.color = c;
+                }
+                if let Some(p) = e.get("pattern").and_then(|x| x.as_str()) {
+                    let p = p.trim();
+                    if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        look.pattern = p.to_string();
+                    }
+                }
+            }
+        }
+    }
+    if let Some(q) = v.get("quiet_hours") {
+        cfg.quiet_enabled = q.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        if let Some(s) = q.get("start").and_then(|x| x.as_str()) {
+            cfg.quiet_start = s.to_string();
+        }
+        if let Some(s) = q.get("end").and_then(|x| x.as_str()) {
+            cfg.quiet_end = s.to_string();
+        }
+    }
+    cfg
+}
+
+fn hhmm_to_mins(v: &str) -> i32 {
+    let mut it = v.split(':');
+    let h: i32 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    let m: i32 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    h * 60 + m
+}
+
+/// Mirrors the quiet-hours window in notify.sh, overnight ranges included.
+fn in_quiet_hours(cfg: &Cfg, now_mins: i32) -> bool {
+    if !cfg.quiet_enabled {
+        return false;
+    }
+    let s = hhmm_to_mins(&cfg.quiet_start);
+    let e = hhmm_to_mins(&cfg.quiet_end);
+    if s <= e {
+        now_mins >= s && now_mins < e
+    } else {
+        now_mins >= s || now_mins < e
+    }
+}
+
+/// `notify.sh` appends one JSON object per line and trims to 1000 when it grows
+/// past 2000, so reading the tail is enough and keeps this cheap once a second.
+fn read_events() -> Vec<(i64, String, String)> {
+    let mut out = Vec::new();
+    let Ok(mut f) = std::fs::File::open(home().join(".claude/notify-state.jsonl")) else {
+        return out;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = len.saturating_sub(TAIL_BYTES);
+    if from > 0 && f.seek(SeekFrom::Start(from)).is_err() {
+        return out;
+    }
+    let mut text = String::new();
+    if f.read_to_string(&mut text).is_err() {
+        return out;
+    }
+    for (i, line) in text.lines().enumerate() {
+        // A mid-line seek leaves a partial first line; skip it.
+        if i == 0 && from > 0 {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let Some(ts) = chrono::DateTime::parse_from_rfc3339(&s("ts")).ok() else {
+            continue;
+        };
+        let key = [s("session"), s("cwd"), s("project")]
+            .into_iter()
+            .find(|k| !k.is_empty())
+            .unwrap_or_default();
+        out.push((ts.timestamp(), s("event"), key));
+    }
+    out
+}
+
+/// event -> a session's standing status, matching App.vue's STATUS_MAP
+/// ("done" there is the `stop` rung here).
+fn standing_of(event: &str) -> Option<&'static str> {
+    match event {
+        "question" => Some("question"),
+        "waiting" => Some("waiting"),
+        "working" | "compact" | "failure" | "task-done" => Some("working"),
+        "stop" | "session-start" => Some("stop"),
+        _ => None,
+    }
+}
+
+/// Walk the ladder top-down and return the first rung that is both enabled
+/// in config and currently true. `None` = nothing to show, ring off.
+fn pick_event(events: &[(i64, String, String)], now: i64, cfg: &Cfg) -> Option<&'static str> {
+    let mut sessions: HashMap<String, (i64, &'static str)> = HashMap::new();
+    let mut flashes: Vec<&str> = Vec::new();
+    for (ts, event, key) in events {
+        if event == "session-end" {
+            sessions.remove(key);
+            continue;
+        }
+        if now - *ts <= TRANSIENT_HOLD_SECS
+            && rung(event).is_some_and(|r| r.transient)
+        {
+            flashes.push(event.as_str());
+        }
+        if let Some(st) = standing_of(event) {
+            sessions.insert(key.clone(), (*ts, st));
+        }
+    }
+    sessions.retain(|_, (ts, _)| now - *ts < STALE_SECS);
+    if sessions.is_empty() {
+        return None;
+    }
+    let standing = |st: &str| sessions.values().any(|(_, s)| *s == st);
+    LADDER
+        .iter()
+        .filter(|r| cfg.events.get(r.event).is_some_and(|e| e.enabled))
+        .find(|r| {
+            if r.transient {
+                flashes.contains(&r.event)
+            } else {
+                standing(r.event)
+            }
+        })
+        .map(|r| r.event)
+}
+
+/// The whole decision: config + event log -> one colour and one pattern.
+/// `None` means the feature is off and the ring should be released.
+fn compute_target() -> Option<LedState> {
+    let cfg = read_cfg();
+    if !cfg.enabled {
+        return None;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let picked = pick_event(&read_events(), now, &cfg).and_then(rung);
+
+    let (pattern, color, speed, scale) = match picked {
+        Some(r) => {
+            let look = cfg.events.get(r.event);
+            (
+                look.map(|l| l.pattern.clone()).unwrap_or_else(|| r.pattern.to_string()),
+                look.map(|l| l.color.clone()).unwrap_or_else(|| r.color.to_string()),
+                r.speed,
+                r.scale,
+            )
+        }
+        None => ("off".to_string(), "000000".to_string(), 50, 1.0),
+    };
+
+    let mut bright = (cfg.brightness.min(MAX_BRIGHT) as f32 * scale).round() as u8;
+    // Quiet hours dim rather than blank: a dark ring is indistinguishable from
+    // an unplugged one.
+    if cfg.dim_in_quiet_hours {
+        let local = chrono::Local::now();
+        let mins = chrono::Timelike::hour(&local) as i32 * 60
+            + chrono::Timelike::minute(&local) as i32;
+        if in_quiet_hours(&cfg, mins) {
+            bright = bright.min(10);
+        }
+    }
+
+    Some(LedState {
+        transport: cfg.transport,
+        host: cfg.host,
+        pattern,
+        color,
+        color2: "000000".to_string(),
+        speed,
+        bright,
+    })
+}
+
+// ------------------------------------------------------------------ transport
+
+enum Conn {
+    Ws(WebSocket<TcpStream>),
+    Serial(Box<dyn serialport::SerialPort>),
+}
+
+impl Conn {
+    fn label(&self) -> &'static str {
+        match self {
+            Conn::Ws(_) => "wifi",
+            Conn::Serial(_) => "usb",
+        }
+    }
+
+    fn is_serial(&self) -> bool {
+        matches!(self, Conn::Serial(_))
+    }
+
+    fn write_line(&mut self, line: &str) -> Result<(), String> {
+        match self {
+            Conn::Ws(ws) => ws
+                .send(Message::Text(line.to_string()))
+                .map_err(|e| e.to_string()),
+            Conn::Serial(port) => port
+                .write_all(format!("{line}\n").as_bytes())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// The firmware streams its pixel buffer back at 20fps (`F <96 hex>`) to
+    /// whoever is listening. We don't want it, but we must read it or the
+    /// socket/serial buffer fills and writes eventually stall. Deliberately
+    /// *not* disabling it with `STREAM 0`: that flag is global firmware state
+    /// shared with every other client, so it would kill LED Lab's live mirror.
+    ///
+    /// Returns the non-frame reply lines, which is how `STATE {json}` gets back
+    /// to the resync check.
+    fn drain(&mut self) -> Result<Vec<String>, String> {
+        let deadline = Instant::now() + DRAIN_WINDOW;
+        let mut lines = Vec::new();
+        match self {
+            Conn::Ws(ws) => {
+                while Instant::now() < deadline {
+                    match ws.read() {
+                        Ok(Message::Text(t)) => {
+                            if !t.starts_with("F ") {
+                                lines.push(t);
+                            }
+                        }
+                        Ok(_) => continue,
+                        Err(tungstenite::Error::Io(e))
+                            if e.kind() == ErrorKind::WouldBlock
+                                || e.kind() == ErrorKind::TimedOut =>
+                        {
+                            break
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                // Flushes any Pong tungstenite queued while reading Pings.
+                match ws.flush() {
+                    Ok(()) => Ok(lines),
+                    Err(tungstenite::Error::Io(e))
+                        if e.kind() == ErrorKind::WouldBlock
+                            || e.kind() == ErrorKind::TimedOut =>
+                    {
+                        Ok(lines)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Conn::Serial(port) => {
+                let mut buf = [0u8; 512];
+                let mut text = String::new();
+                while Instant::now() < deadline {
+                    match port.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
+                        Err(e)
+                            if e.kind() == ErrorKind::TimedOut
+                                || e.kind() == ErrorKind::WouldBlock =>
+                        {
+                            break
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                // Partial trailing lines are simply dropped; the resync probe
+                // repeats, so a truncated STATE just gets picked up next time.
+                for l in text.lines() {
+                    let l = l.trim();
+                    if !l.is_empty() && !l.starts_with("F ") {
+                        lines.push(l.to_string());
+                    }
+                }
+                Ok(lines)
+            }
+        }
+    }
+}
+
+/// Does the ring's own reported `STATE {json}` match what we asked for?
+///
+/// Why bother asking: this is a status light, so a stale colour is a lie. The
+/// ring can drift out of sync for reasons no write error reveals — it reboots
+/// and comes back on defaults, a command is lost, or another client (LED Lab,
+/// a serial console) changes the mode underneath us. Comparing beats blindly
+/// re-sending, which would restart the animation every time.
+fn state_matches(line: &str, want: &LedState) -> Option<bool> {
+    let json = line.strip_prefix("STATE ")?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64());
+    Some(
+        s("mode").as_deref() == Some(want.pattern.as_str())
+            && n("bright") == Some(want.bright.min(MAX_BRIGHT) as u64)
+            && n("speed") == Some(want.speed.clamp(1, 100) as u64)
+            && s("color").as_deref() == Some(want.color.as_str())
+            && s("color2").as_deref() == Some(want.color2.as_str()),
+    )
+}
+
+fn connect_wifi(host: &str) -> Option<Conn> {
+    // Resolve first so a dead mDNS name fails fast instead of inside connect().
+    // macOS resolves *.local through mDNSResponder in plain getaddrinfo.
+    let addr = (host, WS_PORT).to_socket_addrs().ok()?.next()?;
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
+    stream.set_nodelay(true).ok();
+    // Handshake on a blocking stream: a read timeout here would surface as a
+    // spurious Interrupted handshake error.
+    let (ws, _resp) = tungstenite::client::client(format!("ws://{host}:{WS_PORT}/"), stream).ok()?;
+    if let Ok(()) = ws.get_ref().set_read_timeout(Some(DRAIN_WINDOW)) {
+        Some(Conn::Ws(ws))
+    } else {
+        None
+    }
+}
+
+/// macOS exposes both /dev/tty.* (blocks until carrier detect) and /dev/cu.*
+/// (callout, what we want) for the same device. Normalise to cu and dedupe.
+fn candidate_ports() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let ports = match serialport::available_ports() {
+        Ok(p) => p,
+        Err(_) => return out,
+    };
+    for p in ports {
+        let name = p.port_name.replace("/dev/tty.", "/dev/cu.");
+        if !(name.contains("usbserial") || name.contains("usbmodem") || name.contains("wchusb")) {
+            continue;
+        }
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn connect_usb() -> Option<Conn> {
+    for name in candidate_ports() {
+        // ESP32 dev boards wire DTR/RTS to the auto-reset circuit, so a plain
+        // open() reboots the board. That is merely annoying on a healthy ring
+        // (it comes back in ~3s) but on a marginal USB supply it can keep a
+        // boot-looping board from ever recovering, since we probe on a timer.
+        let port = serialport::new(&name, BAUD)
+            .timeout(Duration::from_millis(250))
+            .preserve_dtr_on_open()
+            .open();
+        let Ok(mut port) = port else { continue };
+
+        // Any USB serial device could be sitting on this port — another dev
+        // board, a printer, a radio. Ask before talking: only the ring answers
+        // PONG. Without this we'd spray MODE/COLOR at unrelated hardware.
+        if port.write_all(b"PING\n").is_err() {
+            continue;
+        }
+        let mut seen = String::new();
+        let mut buf = [0u8; 512];
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            match port.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if seen.contains("PONG") || seen.contains("ring_control") {
+                        ok = true;
+                        break;
+                    }
+                    if seen.len() > 8192 {
+                        seen.clear();
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::TimedOut => continue,
+                Err(_) => break,
+            }
+        }
+        if ok {
+            return Some(Conn::Serial(port));
+        }
+    }
+    None
+}
+
+fn connect(target: &LedState) -> Option<Conn> {
+    match target.transport.as_str() {
+        "wifi" => connect_wifi(&target.host),
+        "usb" => connect_usb(),
+        // auto: WiFi first, serial only as a fallback — see the module note on
+        // why this app must not hold the USB port when it doesn't have to.
+        _ => connect_wifi(&target.host).or_else(connect_usb),
+    }
+}
+
+// -------------------------------------------------------------------- emitter
+
+/// Send only what changed. `MODE` restarts the effect (the firmware zeroes its
+/// step counter and blanks the ring), so re-sending it every turn would leave
+/// any animation permanently stuck on frame one.
+fn emit(conn: &mut Conn, want: &LedState, sent: &Option<LedState>) -> Result<(), String> {
+    let bright = want.bright.min(MAX_BRIGHT);
+    let speed = want.speed.clamp(1, 100);
+
+    let fresh = sent.is_none();
+    let prev = sent.as_ref();
+    if fresh || prev != Some(want) {
+        dbg(&format!(
+            "-> {} color={} bright={} speed={}",
+            want.pattern, want.color, bright, speed
+        ));
+    }
+
+    if fresh || prev.map(|p| p.bright.min(MAX_BRIGHT)) != Some(bright) {
+        conn.write_line(&format!("BRIGHT {bright}"))?;
+    }
+    if fresh || prev.map(|p| p.speed.clamp(1, 100)) != Some(speed) {
+        conn.write_line(&format!("SPEED {speed}"))?;
+    }
+    if fresh || prev.map(|p| p.color.as_str()) != Some(want.color.as_str()) {
+        conn.write_line(&format!("COLOR {}", want.color))?;
+    }
+    if fresh || prev.map(|p| p.color2.as_str()) != Some(want.color2.as_str()) {
+        conn.write_line(&format!("COLOR2 {}", want.color2))?;
+    }
+    // Mode last, so the effect starts with its colours already in place.
+    if fresh || prev.map(|p| p.pattern.as_str()) != Some(want.pattern.as_str()) {
+        conn.write_line(&format!("MODE {}", want.pattern))?;
+    }
+    Ok(())
+}
+
+/// Settings-panel text, so a ring that is dim because of power says so instead
+/// of looking like the brightness slider is broken.
+fn brownout_note(label: &str, div: u8) -> String {
+    let base = if label == "wifi" {
+        "Connected over WiFi"
+    } else {
+        "Connected over USB"
+    };
+    if div > 1 {
+        format!("{base} — ring keeps resetting, brightness reduced (check its power)")
+    } else {
+        base.to_string()
+    }
+}
+
+fn backoff(fails: u32) -> Duration {
+    Duration::from_secs((2 * fails.min(15)) as u64).max(Duration::from_secs(2))
+}
+
+/// Spawn the LED worker. Cheap when the feature is off: with `enabled: false`
+/// it never probes mDNS and never opens a serial port.
+pub fn start() {
+    let _ = shared();
+    std::thread::Builder::new()
+        .name("led-ring".into())
+        .spawn(run)
+        .ok();
+}
+
+/// Turning the feature off, or quitting, must leave the ring dark. Just
+/// dropping the connection would abandon it mid-colour, still glowing.
+fn blank(conn: &mut Option<Conn>) {
+    if let Some(c) = conn.as_mut() {
+        let _ = c.write_line("CLEAR");
+        // CLEAR is answered asynchronously; give the write a moment to leave.
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    *conn = None;
+}
+
+fn run() {
+    let mut conn: Option<Conn> = None;
+    let mut sent: Option<LedState> = None;
+    let mut fails: u32 = 0;
+    let mut next_try = Instant::now();
+    let mut next_wifi_check = Instant::now() + WIFI_RECHECK;
+    let mut next_probe = Instant::now();
+    let mut cached: Option<LedState> = None;
+    let mut next_compute = Instant::now();
+    // Brownout guard, see `brownout_note` below.
+    let mut connects: Vec<Instant> = Vec::new();
+    let mut brownout_div: u8 = 1;
+    let mut stable_since = Instant::now();
+
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            blank(&mut conn);
+            CLEARED.store(true, Ordering::SeqCst);
+            return;
+        }
+
+        // The loop turns every ~120ms draining frames; re-deriving the target
+        // from two files that often would be wasteful.
+        if Instant::now() >= next_compute {
+            next_compute = Instant::now() + Duration::from_millis(1000);
+            let fresh = compute_target();
+            if fresh != cached {
+                dbg(&format!("target <- {fresh:?}"));
+                cached = fresh;
+            }
+        }
+        let target = cached.clone();
+
+        // A ring resetting under its own load must not be held there by us.
+        let target = target.map(|mut t| {
+            if brownout_div > 1 {
+                t.bright = (t.bright / brownout_div).max(8);
+            }
+            t
+        });
+
+        let Some(target) = target else {
+            // Feature off: blank the ring, then let go of the hardware so
+            // nothing else is blocked out of the serial port.
+            if conn.is_some() {
+                blank(&mut conn);
+                sent = None;
+                set_status(false, "", "");
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        };
+
+        // Sitting on serial in auto mode: keep an eye out for the ring turning
+        // up on the network, and hand the USB port back when it does.
+        if conn.as_ref().is_some_and(|c| c.is_serial())
+            && target.transport == "auto"
+            && Instant::now() >= next_wifi_check
+        {
+            next_wifi_check = Instant::now() + WIFI_RECHECK;
+            if let Some(ws) = connect_wifi(&target.host) {
+                dbg("wifi is back, releasing the serial port");
+                conn = Some(ws);
+                sent = None;
+                set_status(true, "wifi", "Connected over WiFi");
+            }
+        }
+
+        if conn.is_none() {
+            if Instant::now() < next_try {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            match connect(&target) {
+                Some(c) => {
+                    let label = c.label();
+                    conn = Some(c);
+                    sent = None;
+                    fails = 0;
+                    next_wifi_check = Instant::now() + WIFI_RECHECK;
+                    stable_since = Instant::now();
+
+                    // Repeated reconnects in a short window mean the ring keeps
+                    // rebooting, and the most common cause is the LEDs browning
+                    // out the board on USB power. Back the brightness off rather
+                    // than re-applying the value that just killed it.
+                    let now = Instant::now();
+                    connects.push(now);
+                    connects.retain(|t| now.duration_since(*t) < BROWNOUT_WINDOW);
+                    if connects.len() >= 3 && brownout_div < 4 {
+                        brownout_div *= 2;
+                        connects.clear();
+                        dbg(&format!("suspected brownout, brightness /{brownout_div}"));
+                    }
+
+                    dbg(&format!("connected over {label}"));
+                    set_status(
+                        true,
+                        label,
+                        &brownout_note(label, brownout_div),
+                    );
+                }
+                None => {
+                    fails = fails.saturating_add(1);
+                    next_try = Instant::now() + backoff(fails);
+                    dbg(&format!("no ring found, retry in {:?}", backoff(fails)));
+                    set_status(false, "", "No ring found — will keep looking");
+                    continue;
+                }
+            }
+        }
+
+        if brownout_div > 1 && conn.is_some() && stable_since.elapsed() > BROWNOUT_RECOVER {
+            brownout_div = 1;
+            connects.clear();
+            stable_since = Instant::now();
+            sent = None; // re-apply at full brightness
+            dbg("link stable, restoring brightness");
+        }
+
+        if let Some(c) = conn.as_mut() {
+            let mut failed = emit(c, &target, &sent).is_err();
+            if !failed {
+                sent = Some(target.clone());
+                // Ask what the ring is really showing, on a slower cadence than
+                // the loop so it costs one small message every few seconds.
+                if Instant::now() >= next_probe {
+                    next_probe = Instant::now() + RESYNC_PROBE;
+                    failed = c.write_line("STATE?").is_err();
+                }
+            }
+            if !failed {
+                match c.drain() {
+                    Ok(lines) => {
+                        for l in &lines {
+                            if state_matches(l, &target) == Some(false) {
+                                dbg(&format!("ring drifted, re-asserting: {l}"));
+                                sent = None; // forces a full re-emit next turn
+                            }
+                        }
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            if failed {
+                dbg("emit/drain failed");
+                // Dropping `conn` closes the socket / releases the serial port.
+                conn = None;
+                sent = None;
+                fails = fails.saturating_add(1);
+                next_try = Instant::now() + backoff(fails);
+                set_status(false, "", "Ring disconnected — will keep looking");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_000_000;
+    fn ev(secs_ago: i64, event: &str, key: &str) -> (i64, String, String) {
+        (NOW - secs_ago, event.to_string(), key.to_string())
+    }
+    fn pick(e: &[(i64, String, String)]) -> Option<&'static str> {
+        pick_event(e, NOW, &Cfg::default())
+    }
+
+    #[test]
+    fn no_events_means_ring_off() {
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn stale_sessions_are_dropped() {
+        assert_eq!(pick(&[ev(STALE_SECS + 1, "waiting", "s1")]), None);
+    }
+
+    #[test]
+    fn session_end_removes_a_session() {
+        assert_eq!(pick(&[ev(20, "waiting", "s1"), ev(10, "session-end", "s1")]), None);
+    }
+
+    #[test]
+    fn last_event_wins_per_session() {
+        assert_eq!(pick(&[ev(30, "waiting", "s1"), ev(10, "stop", "s1")]), Some("stop"));
+    }
+
+    #[test]
+    fn question_outranks_everything() {
+        let e = [ev(5, "waiting", "s1"), ev(4, "question", "s2"), ev(3, "failure", "s3")];
+        assert_eq!(pick(&e), Some("question"));
+    }
+
+    #[test]
+    fn waiting_outranks_failure_and_working() {
+        let e = [ev(5, "working", "s1"), ev(4, "failure", "s2"), ev(3, "waiting", "s3")];
+        assert_eq!(pick(&e), Some("waiting"));
+    }
+
+    #[test]
+    fn transient_events_flash_then_go_dark() {
+        assert_eq!(pick(&[ev(5, "failure", "s1")]), Some("failure"));
+        assert_eq!(pick(&[ev(5, "task-done", "s1")]), Some("task-done"));
+        assert_eq!(pick(&[ev(5, "stop", "s1")]), Some("stop"));
+        // Past the hold window nothing needs the user: ring off, even though
+        // the session is still on the dashboard.
+        assert_eq!(pick(&[ev(TRANSIENT_HOLD_SECS + 5, "failure", "s1")]), None);
+        assert_eq!(pick(&[ev(TRANSIENT_HOLD_SECS + 5, "stop", "s1")]), None);
+    }
+
+    #[test]
+    fn working_is_status_not_notification_and_defaults_dark() {
+        assert_eq!(pick(&[ev(5, "working", "s1")]), None);
+        let mut cfg = Cfg::default();
+        cfg.events.get_mut("working").unwrap().enabled = true;
+        assert_eq!(pick_event(&[ev(5, "working", "s1")], NOW, &cfg), Some("working"));
+    }
+
+    #[test]
+    fn needs_you_states_stay_lit_until_answered() {
+        // An hour-old unanswered question is still a notification.
+        assert_eq!(pick(&[ev(3600, "question", "s1")]), Some("question"));
+        assert_eq!(pick(&[ev(3600, "waiting", "s1")]), Some("waiting"));
+        // Answering it (a new event for that session) clears it.
+        assert_eq!(pick(&[ev(3600, "waiting", "s1"), ev(3000, "working", "s1")]), None);
+    }
+
+    #[test]
+    fn quiet_by_default_events_stay_quiet() {
+        // compact and session-start default to LED off, like their banners.
+        assert_eq!(pick(&[ev(5, "compact", "s1")]), None);
+        assert_eq!(pick(&[ev(5, "session-start", "s1")]), None);
+    }
+
+    #[test]
+    fn disabling_an_event_falls_through_to_the_next_rung() {
+        let mut cfg = Cfg::default();
+        cfg.events.get_mut("waiting").unwrap().enabled = false;
+        cfg.events.get_mut("working").unwrap().enabled = true;
+        let e = [ev(5, "working", "s1"), ev(3, "waiting", "s2")];
+        assert_eq!(pick_event(&e, NOW, &cfg), Some("working"));
+        // Everything off: the ring is dark even with live sessions.
+        for l in cfg.events.values_mut() {
+            l.enabled = false;
+        }
+        assert_eq!(pick_event(&e, NOW, &cfg), None);
+    }
+
+    #[test]
+    fn colour_input_is_normalised_and_validated() {
+        assert_eq!(clean_color("#FFB000"), Some("ffb000".into()));
+        assert_eq!(clean_color("ffb000"), Some("ffb000".into()));
+        assert_eq!(clean_color("#fff"), None);
+        assert_eq!(clean_color("gggggg"), None);
+    }
+
+    #[test]
+    fn quiet_hours_handles_overnight_ranges() {
+        let cfg = Cfg {
+            quiet_enabled: true,
+            quiet_start: "22:00".into(),
+            quiet_end: "08:00".into(),
+            ..Cfg::default()
+        };
+        assert!(in_quiet_hours(&cfg, 23 * 60));
+        assert!(in_quiet_hours(&cfg, 2 * 60));
+        assert!(!in_quiet_hours(&cfg, 12 * 60));
+        let day = Cfg { quiet_start: "09:00".into(), quiet_end: "17:00".into(), ..cfg };
+        assert!(in_quiet_hours(&day, 12 * 60));
+        assert!(!in_quiet_hours(&day, 20 * 60));
+    }
+
+    #[test]
+    fn state_matches_compares_every_field() {
+        let want = LedState {
+            transport: "auto".into(),
+            host: "h".into(),
+            pattern: "breathe".into(),
+            color: "ffb000".into(),
+            color2: "000000".into(),
+            speed: 45,
+            bright: 60,
+        };
+        let good = r#"STATE {"mode":"breathe","bright":60,"speed":45,"color":"ffb000","color2":"000000"}"#;
+        assert_eq!(state_matches(good, &want), Some(true));
+        let drifted = r#"STATE {"mode":"rainbow","bright":60,"speed":45,"color":"ffb000","color2":"000000"}"#;
+        assert_eq!(state_matches(drifted, &want), Some(false));
+        // Anything that isn't a STATE line must not be read as drift.
+        assert_eq!(state_matches("OK mode breathe", &want), None);
+    }
+}

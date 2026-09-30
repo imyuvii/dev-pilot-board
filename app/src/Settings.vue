@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch, computed } from "vue";
+import { onMounted, onUnmounted, ref, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   readTextFile,
@@ -7,6 +7,7 @@ import {
   exists,
   BaseDirectory,
 } from "@tauri-apps/plugin-fs";
+import { ledDefaults, LED_EVENTS, PATTERNS, type LedCfg, type LedStatus } from "./led";
 
 const CONFIG_FILE = ".claude/notify-config.json";
 
@@ -35,6 +36,7 @@ interface Config {
   mute: { claude: boolean; copilot: boolean };
   quiet_hours: { enabled: boolean; start: string; end: string };
   events: Record<string, EventCfg>;
+  led: LedCfg;
 }
 
 function defaults(): Config {
@@ -46,12 +48,36 @@ function defaults(): Config {
     mute: { claude: false, copilot: false },
     quiet_hours: { enabled: false, start: "22:00", end: "08:00" },
     events,
+    led: ledDefaults(),
   };
 }
 
 const config = ref<Config>(defaults());
 const loaded = ref(false);
 let saveTimer: number | undefined;
+// Anything in the file this panel doesn't model (script-only keys like
+// throttle_seconds) is carried through the save round-trip untouched.
+let storedRaw: Record<string, unknown> = {};
+
+const ledStatus = ref<LedStatus>({ connected: false, transport: "", detail: "" });
+let ledTimer: number | undefined;
+
+async function refreshLed() {
+  try {
+    ledStatus.value = await invoke<LedStatus>("led_status");
+  } catch {
+    /* ignore — the ring is optional */
+  }
+}
+
+const ledLine = computed(() => {
+  if (!config.value.led.enabled) return "Off — the ring is never contacted.";
+  if (ledStatus.value.connected)
+    return ledStatus.value.transport === "wifi"
+      ? "Connected over WiFi."
+      : "Connected over USB.";
+  return ledStatus.value.detail || "Looking for the ring…";
+});
 
 function fmt12(v: string): string {
   const [h, mm] = v.split(":").map(Number);
@@ -81,8 +107,13 @@ onMounted(async () => {
     if (await exists(CONFIG_FILE, { baseDir: BaseDirectory.Home })) {
       const text = await readTextFile(CONFIG_FILE, { baseDir: BaseDirectory.Home });
       const stored = JSON.parse(text);
+      storedRaw = stored && typeof stored === "object" ? stored : {};
       const merged = defaults();
       merged.mute = { ...merged.mute, ...(stored.mute ?? {}) };
+      merged.led = { ...merged.led, ...(stored.led ?? {}), events: merged.led.events };
+      for (const key of Object.keys(merged.led.events)) {
+        merged.led.events[key] = { ...merged.led.events[key], ...(stored.led?.events?.[key] ?? {}) };
+      }
       if (stored.master_mute === true) {
         // migrate legacy single switch
         merged.mute.claude = true;
@@ -98,7 +129,11 @@ onMounted(async () => {
     console.error("failed to load config", e);
   }
   loaded.value = true;
+  refreshLed();
+  ledTimer = window.setInterval(refreshLed, 2000);
 });
+
+onUnmounted(() => clearInterval(ledTimer));
 
 watch(
   config,
@@ -109,7 +144,7 @@ watch(
       try {
         await writeTextFile(
           CONFIG_FILE,
-          JSON.stringify(config.value, null, 2),
+          JSON.stringify({ ...storedRaw, ...config.value }, null, 2),
           { baseDir: BaseDirectory.Home }
         );
       } catch (e) {
@@ -200,6 +235,84 @@ function setTone(key: string, ev: globalThis.Event) {
       </div>
     </section>
 
+    <section class="card list">
+      <div class="row" :class="{ split: config.led.enabled }">
+        <span class="row-label">
+          💡&nbsp; LED ring
+          <span class="row-sub">mirror the busiest session on hardware</span>
+        </span>
+        <button
+          class="switch" role="switch" :aria-checked="config.led.enabled"
+          :class="{ on: config.led.enabled }"
+          @click="config.led.enabled = !config.led.enabled"
+        ><span class="knob" /></button>
+      </div>
+      <template v-if="config.led.enabled">
+        <div class="times">
+          <span class="mono-label">LINK</span>
+          <select v-model="config.led.transport">
+            <option value="auto">Auto (WiFi, then USB)</option>
+            <option value="wifi">WiFi only</option>
+            <option value="usb">USB only</option>
+          </select>
+        </div>
+        <div class="times" v-if="config.led.transport !== 'usb'">
+          <span class="mono-label">HOST</span>
+          <input v-model="config.led.host" spellcheck="false" placeholder="ledring.local" />
+        </div>
+        <div class="times">
+          <span class="mono-label">BRIGHT</span>
+          <input
+            type="range" min="5" max="160" step="5"
+            v-model.number="config.led.brightness"
+          />
+          <span class="range-val">{{ config.led.brightness }}</span>
+        </div>
+        <div class="row">
+          <span class="row-label">🌙&nbsp; Dim during quiet hours</span>
+          <button
+            class="switch" role="switch" :aria-checked="config.led.dim_in_quiet_hours"
+            :class="{ on: config.led.dim_in_quiet_hours }"
+            @click="config.led.dim_in_quiet_hours = !config.led.dim_in_quiet_hours"
+          ><span class="knob" /></button>
+        </div>
+
+        <div class="led-grid head">
+          <span class="mono-label lg">RING SHOWS</span>
+          <span class="mono-label ctr">LED</span>
+          <span class="mono-label ctr">COLOUR</span>
+          <span class="mono-label">PATTERN</span>
+        </div>
+        <div v-for="e in LED_EVENTS" :key="e.key" class="led-grid row-line">
+          <span class="ev-name" :title="e.label">
+            {{ e.emoji }}&nbsp; {{ e.label }}
+            <span v-if="e.hint" class="row-sub">{{ e.hint }}</span>
+          </span>
+          <button
+            class="check" title="Light the ring for this" :class="{ on: config.led.events[e.key].enabled }"
+            @click="config.led.events[e.key].enabled = !config.led.events[e.key].enabled"
+          >{{ config.led.events[e.key].enabled ? "✓" : "" }}</button>
+          <input
+            type="color" class="swatch" title="Colour"
+            :value="'#' + config.led.events[e.key].color"
+            @input="config.led.events[e.key].color = ($event.target as HTMLInputElement).value.slice(1)"
+          />
+          <select v-model="config.led.events[e.key].pattern">
+            <option v-for="p in PATTERNS" :key="p" :value="p">{{ p }}</option>
+          </select>
+        </div>
+        <div class="quiet-summary">
+          Dark unless something needs you. Waiting and questions stay lit until you
+          respond; everything else flashes for 30s. Top row wins when several sessions
+          are active.
+        </div>
+      </template>
+      <div class="led-status">
+        <span class="dot" :class="{ live: ledStatus.connected }" />
+        {{ ledLine }}
+      </div>
+    </section>
+
     <p class="hint">
       Changes save automatically and apply to the next notification — no restart needed.
     </p>
@@ -246,6 +359,47 @@ function setTone(key: string, ev: globalThis.Event) {
   font: 500 12.5px "Geist Mono", monospace; cursor: pointer;
 }
 .quiet-summary { font-size: 11.5px; color: var(--ink3); padding: 0 0 11px; }
+
+.times input[type="text"], .times input:not([type]) {
+  flex: 1; background: var(--card2); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+  font: 500 12.5px "Geist Mono", monospace;
+}
+.times input[type="range"] { flex: 1; accent-color: var(--accent); }
+.range-val {
+  font: 600 11.5px "Geist Mono", monospace; color: var(--ink2);
+  min-width: 26px; text-align: right;
+}
+
+.led-grid {
+  display: grid; grid-template-columns: 1fr 44px 48px 104px;
+  align-items: center; gap: 6px;
+}
+.led-grid.head { padding: 6px 0 7px; }
+.led-grid.row-line { padding: 5px 0; border-top: 1px solid var(--line); }
+.led-grid .ev-name .row-sub { font-size: 10.5px; margin-left: 2px; }
+.led-grid select {
+  background: var(--card2); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 7px; padding: 4px 5px;
+  font: 500 11.5px "Geist Mono", monospace; cursor: pointer; width: 100%;
+}
+.swatch {
+  width: 26px; height: 22px; padding: 0; justify-self: center;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent;
+  cursor: pointer;
+}
+.swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+
+.led-status {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11.5px; color: var(--ink3); padding: 0 0 11px;
+}
+.led-status .dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--toggleOff);
+}
+.led-status .dot.live { background: var(--accent); }
 
 .mono-label {
   font: 600 9.5px "Geist Mono", monospace; letter-spacing: 0.08em; color: var(--ink3);

@@ -21,6 +21,8 @@ Copilot CLI hooks ─┘               └─> ~/.claude/notify-state.jsonl (app
                                         Tauri app (Vue 3 frontend, Rust shell)
                                           ├─ menu-bar tray icon + status glyph
                                           ├─ dashboard window (sessions + history)
+                                          ├─ LED ring worker ──> USB serial | WebSocket :81
+                                          │                        (optional hardware)
                                           └─ settings panel ──> ~/.claude/notify-config.json
                                                                        │ read on every event
                                                                   notify.sh (loop closes)
@@ -93,8 +95,56 @@ the hook script reads it. Either side works when the other is absent.
   per-source mutes).
 - **FR-20** Sound precedence: `CLAUDE_NOTIFY_SOUND_<EVENT>` env var > config file >
   built-in default.
+- **FR-20a** Per-event throttling: an event may declare a cooldown so a burst collapses
+  into a single alert per session (leading edge — the first event in the window rings,
+  the rest are silent). `failure` defaults to 300s because the host fires it on *every*
+  failed tool call, subagents included, and routine failures (blocked WebFetch, non-zero
+  grep exits) can produce dozens per session. Override with
+  `.events.<event>.throttle_seconds`; `0` disables. Throttled events are still written to
+  the state log, so the dashboard shows every occurrence.
 
-### 3.6 Onboarding & distribution
+### 3.6 LED ring output (optional hardware)
+
+An external 16-LED WS2812B ring on an ESP32 (the `led-iot` project) can mirror the board's
+busiest session as one colour and one pattern.
+
+- **FR-20b** Both links are supported, as in LED Lab: USB serial at 115200 baud, or a
+  WebSocket on port 81 (`ledring.local`). `transport` selects `auto` | `wifi` | `usb`.
+  `auto` prefers WiFi and falls back to serial, then re-checks WiFi every 15s and releases
+  the serial port when the ring reappears on the network — only one process can hold a
+  serial port, and this app must not lock out LED Lab or `arduino-cli upload`.
+- **FR-20c** Per-event configuration, like sound and banner: each event has LED on/off,
+  a colour and a pattern from the firmware's effect list. Defaults, most urgent first
+  (this order is fixed and decides what wins across sessions): question (magenta
+  breathe) > waiting (amber breathe) > failure (red solid) > task-done (cyan sparkle) >
+  compact (purple breathe, off by default) > session-start (white chase, off by
+  default) > working (blue comet, off by default — it is a status, not a notification)
+  > stop / done responding (green solid). The ring is a notification light: dark unless
+  a one-off event (failure, task-done, compact, session-start, stop) happened in the
+  last 30s, or an agent is waiting / asked a question — those stay lit until the user
+  responds. Disabling an event makes the ring fall through to the next rung.
+- **FR-20d** The app sends only a pattern name from the firmware's existing effect list
+  plus colours, brightness and speed. Adding an agent source or event is a change to the
+  mapping in `led.rs`; the firmware is never reflashed for it. The decision runs in the
+  Rust shell, not the webview, so it keeps working while the dashboard window is hidden.
+- **FR-20e** Brightness is capped at 160 (the firmware's 5V/700mA budget covers the ring
+  and the WiFi radio from one USB supply) and dims to 10 during quiet hours when
+  `dim_in_quiet_hours` is set — the ring dims rather than blanking, because a dark ring is
+  indistinguishable from an unplugged one.
+- **FR-20f** Drift self-heals: the worker asks the ring for `STATE?` every 5s and
+  re-asserts on a mismatch, so a ring that rebooted onto firmware defaults or was changed
+  by another client returns to the real status. A status light showing a stale colour is
+  worse than one that is off.
+- **FR-20h** Brownout guard: three reconnects within 90s is treated as the ring rebooting
+  under load; the app halves brightness (to a floor) instead of re-applying the value
+  that caused it, reports "brightness reduced (check its power)" in Settings, and
+  restores full brightness after five stable minutes.
+- **FR-20g** Strictly optional, and off by default. `notify.sh` has no knowledge of the
+  ring. With `led.enabled` false nothing probes mDNS and no serial port is opened. No
+  board, no network, or a port held by another app are all silent retries with backoff;
+  none of it may produce an error or affect sounds, banners or the dashboard.
+
+### 3.7 Onboarding & distribution
 
 - **FR-21** In-app hook setup: when no notify.sh hooks are detected in
   `~/.claude/settings.json`, the dashboard shows a "Connect your agents" card;
@@ -117,7 +167,9 @@ the hook script reads it. Either side works when the other is absent.
   (hooks are async, short timeouts, all failure paths exit 0).
 - **NFR-3** Privacy: everything is local — no network calls at runtime; state and config
   stay in the user's home directory.
-- **NFR-4** The app is optional: sounds and banners work with the shell script alone.
+- **NFR-4** The app is optional: sounds and banners work with the shell script alone, and
+  the LED ring is optional in the same way one layer further out — the app is fully
+  functional with no ring attached, and off by default.
 - **NFR-5** Cross-platform-ready: the app builds for macOS, Windows, and Linux; the
   delivery layer (`afplay`/`osascript`) is the only macOS-specific component and is
   isolated inside notify.sh.
@@ -143,6 +195,8 @@ the hook script reads it. Either side works when the other is absent.
 | `app/src/App.vue` | Dashboard (sessions, history, tray glyph updates) |
 | `app/src/Settings.vue` | Settings panel (writes notify-config.json) |
 | `app/src-tauri/src/lib.rs` | Tray, window lifecycle, `set_tray_title`, `play_sound` |
+| `app/src/led.ts` | LED config types for the settings panel |
+| `app/src-tauri/src/led.rs` | LED pipeline: log + config -> status -> colour/pattern -> USB serial / WebSocket; `led_status` |
 | `app/assets/icon.svg`, `tray.svg` | Icon sources (rendered via sharp, `tauri icon`) |
 | `~/.claude/notify-state.jsonl` | Event log (runtime, not in repo) |
 | `~/.claude/notify-config.json` | User preferences (runtime, not in repo) |

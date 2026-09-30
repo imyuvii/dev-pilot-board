@@ -1,3 +1,4 @@
+mod led;
 mod setup;
 
 use tauri::{
@@ -67,6 +68,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Optional LED ring. Reads the event log and config itself so it
+            // keeps working while the dashboard window is hidden; every failure
+            // path inside is a silent retry.
+            led::start();
+
             let show = MenuItem::with_id(app, "show", "Open Dashboard", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -122,8 +128,15 @@ pub fn run() {
             set_tray_title,
             play_sound,
             hooks_status,
-            setup_hooks
+            setup_hooks,
+            led::led_status
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Blank the ring on the way out rather than leaving it glowing.
+            if let tauri::RunEvent::Exit = event {
+                led::shutdown();
+            }
+        });
 }

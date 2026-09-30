@@ -10,6 +10,13 @@
 # Silent events: working | session-end   (state log only, for the desktop app)
 #
 # Sound precedence: CLAUDE_NOTIFY_SOUND_<EVENT> env var > config file > built-in default.
+#
+# Throttling: an event may declare a cooldown so bursts collapse into one alert per
+# session. `failure` defaults to 300s because PostToolUseFailure fires on every failed
+# tool call — including routine ones from subagents (blocked WebFetch, non-zero grep
+# exits) — and a single research-heavy session can emit dozens. Override per event with
+# `.events.<event>.throttle_seconds` in the config (0 disables). Throttled events are
+# still written to the state log, so the desktop app sees every one.
 
 EVENT="${1:-stop}"
 SOURCE="${2:-claude}"
@@ -44,11 +51,12 @@ fi
 
 # ---- Built-in defaults per event -------------------------------------------
 BANNER=1
+THROTTLE=0
 case "$EVENT" in
   stop)          SOUND=Glass;     MSG="Done responding in $PROJECT" ;;
   waiting)       SOUND=Ping;      MSG="${DETAIL:-Waiting for your input} — $PROJECT" ;;
   question)      SOUND=Hero;      MSG="Claude has a question in $PROJECT" ;;
-  failure)       SOUND=Basso;     MSG="A tool call failed in $PROJECT" ;;
+  failure)       SOUND=Basso;     MSG="A tool call failed in $PROJECT"; THROTTLE=300 ;;
   task-done)     SOUND=Submarine; MSG="Background task finished in $PROJECT" ;;
   compact)       SOUND=Purr;      MSG="Compacting context in $PROJECT"; BANNER=0 ;;
   session-start) SOUND=Pop;       MSG="Session started: $PROJECT";     BANNER=0 ;;
@@ -71,15 +79,18 @@ if [ -f "$CONFIG" ] && command -v jq >/dev/null 2>&1; then
 
   # Note: "// d" would swallow a stored `false`, so null-check explicitly
   CFG=$(jq -r --arg e "$EVENT" \
-    '[.events[$e].sound_enabled, .events[$e].banner_enabled, .events[$e].sound]
+    '[.events[$e].sound_enabled, .events[$e].banner_enabled, .events[$e].sound,
+      .events[$e].throttle_seconds]
      | map(if . == null then "d" else tostring end) | join("|")' \
     "$CONFIG" 2>/dev/null)
-  IFS='|' read -r CFG_SOUND_ON CFG_BANNER_ON CFG_SOUND <<< "$CFG"
+  IFS='|' read -r CFG_SOUND_ON CFG_BANNER_ON CFG_SOUND CFG_THROTTLE <<< "$CFG"
   [ "$CFG_SOUND_ON" = "false" ] && SOUND_ON=0
   [ "$CFG_SOUND_ON" = "true" ] && SOUND_ON=1
   [ "$CFG_BANNER_ON" = "false" ] && BANNER=0
   [ "$CFG_BANNER_ON" = "true" ] && BANNER=1
   [ "$CFG_SOUND" != "d" ] && [ -n "$CFG_SOUND" ] && SOUND="$CFG_SOUND"
+  # Only accept a plain non-negative integer; anything else keeps the built-in default
+  case "$CFG_THROTTLE" in ''|d|*[!0-9]*) ;; *) THROTTLE="$CFG_THROTTLE" ;; esac
 
   # Quiet hours: suppress sounds only; banners stay as configured
   if [ "$(jq -r '.quiet_hours.enabled // false' "$CONFIG" 2>/dev/null)" = "true" ]; then
@@ -94,6 +105,26 @@ if [ -f "$CONFIG" ] && command -v jq >/dev/null 2>&1; then
       # Overnight range, e.g. 22:00 -> 08:00
       { [ "$NOW_M" -ge "$START_M" ] || [ "$NOW_M" -lt "$END_M" ]; } && SOUND_ON=0
     fi
+  fi
+fi
+
+# ---- Throttle: collapse bursts into one alert per session -------------------
+# Leading edge: the first event in a window rings, the rest are silent. Already logged
+# above, so the dashboard still shows every occurrence.
+if [ "$THROTTLE" -gt 0 ] 2>/dev/null; then
+  THROTTLE_DIR="$HOME/.claude/notify-throttle"
+  mkdir -p "$THROTTLE_DIR" 2>/dev/null
+  KEY=$(printf '%s-%s' "$EVENT" "${SESSION:-$PROJECT}" | tr -cd 'A-Za-z0-9._-')
+  STAMP="$THROTTLE_DIR/${KEY:-$EVENT}"
+  NOW_S=$(date +%s)
+  LAST_S=$(cat "$STAMP" 2>/dev/null)
+  case "$LAST_S" in ''|*[!0-9]*) LAST_S=0 ;; esac
+  [ $((NOW_S - LAST_S)) -lt "$THROTTLE" ] && exit 0
+  printf '%s' "$NOW_S" > "$STAMP" 2>/dev/null
+
+  # Occasionally drop stamps from sessions that ended long ago
+  if [ $((RANDOM % 25)) -eq 0 ]; then
+    find "$THROTTLE_DIR" -type f -mtime +1 -delete 2>/dev/null
   fi
 fi
 

@@ -816,10 +816,12 @@ fn is_ring(ip: Ipv4Addr) -> bool {
 }
 
 fn scan_subnet(local: Ipv4Addr) -> Option<Ipv4Addr> {
-    (0..SCAN_PASSES).find_map(|_| scan_subnet_once(local))
+    (0..SCAN_PASSES).find_map(|_| scan_subnet_once(local).0)
 }
 
-fn scan_subnet_once(local: Ipv4Addr) -> Option<Ipv4Addr> {
+/// One pass: (the first port-81 listener that answers like a ring, every
+/// port-81 listener seen). The second half is for the diagnostics panel.
+fn scan_subnet_once(local: Ipv4Addr) -> (Option<Ipv4Addr>, Vec<Ipv4Addr>) {
     let [a, b, c, me] = local.octets();
     let hosts: Vec<Ipv4Addr> = (1..=254u8)
         .filter(|&d| d != me)
@@ -841,10 +843,41 @@ fn scan_subnet_once(local: Ipv4Addr) -> Option<Ipv4Addr> {
             });
         }
     });
-    let mut open = open.into_inner().ok()?;
+    let mut open = open.into_inner().unwrap_or_default();
     open.sort();
     dbg(&format!("scan {a}.{b}.{c}.0/24: port 81 open on {open:?}"));
-    open.into_iter().find(|&ip| is_ring(ip))
+    let hit = open.iter().copied().find(|&ip| is_ring(ip));
+    (hit, open)
+}
+
+/// The default gateway, from the routing table. Reaching it is the cheapest
+/// proof that this app is allowed to talk to the LAN at all.
+fn gateway() -> Option<Ipv4Addr> {
+    let out = std::process::Command::new("/sbin/route").args(["-n", "get", "default"]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gateway:"))
+        .and_then(|g| g.trim().parse().ok())
+}
+
+/// What a failed LAN connect means, in words. macOS answers "No route to
+/// host" (EHOSTUNREACH) for *every* local address when Local Network access
+/// is denied for the app — that is the signature we want to name.
+enum LanVerdict {
+    Reachable,
+    Blocked,
+    Silent,
+}
+
+fn lan_probe(ip: Ipv4Addr, port: u16) -> LanVerdict {
+    let addr = SocketAddr::new(IpAddr::V4(ip), port);
+    match TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) {
+        Ok(_) => LanVerdict::Reachable,
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => LanVerdict::Reachable,
+        // 65 EHOSTUNREACH, 51 ENETUNREACH, 50 ENETDOWN on macOS
+        Err(e) if matches!(e.raw_os_error(), Some(65) | Some(51) | Some(50)) => LanVerdict::Blocked,
+        Err(_) => LanVerdict::Silent,
+    }
 }
 
 /// Turn the configured host into an address the ring actually answers on.
@@ -940,6 +973,22 @@ pub fn discover(host: &str) -> DiscoveryReport {
         },
     );
 
+    let gw = gateway();
+    let mut lan = LanVerdict::Silent;
+    match (local, gw) {
+        (Some(_), Some(g)) => {
+            lan = lan_probe(g, 80);
+            let (ok, detail) = match lan {
+                LanVerdict::Reachable => (true, format!("router {g} answers — this app may use the local network")),
+                LanVerdict::Blocked => (false, format!("router {g}: \"No route to host\" — macOS is blocking this app's local-network access")),
+                LanVerdict::Silent => (false, format!("router {g} did not answer on port 80 (not conclusive)")),
+            };
+            step("Local network access", ok, detail);
+        }
+        (Some(_), None) => step("Local network access", false, "no default route found".into()),
+        (None, _) => {}
+    }
+
     if let Ok(IpAddr::V4(ip)) = host.parse::<IpAddr>() {
         let ok = is_ring(ip);
         step("Configured address", ok, if ok { format!("{ip} answers like a ring") } else { format!("{ip} does not answer on port {WS_PORT}") });
@@ -996,13 +1045,25 @@ pub fn discover(host: &str) -> DiscoveryReport {
                 *t = Some(Instant::now());
             }
             let [a, b, c, _] = l.octets();
-            let hit = scan_subnet(l);
+            let (mut hit, mut open) = scan_subnet_once(l);
+            if hit.is_none() {
+                let again = scan_subnet_once(l);
+                hit = again.0;
+                open.extend(again.1);
+                open.sort();
+                open.dedup();
+            }
+            let listeners: Vec<String> = open.iter().map(|ip| ip.to_string()).collect();
             step(
                 "Sweep of the local network",
                 hit.is_some(),
                 match hit {
                     Some(ip) => format!("{a}.{b}.{c}.0/24 — ring found at {ip}"),
-                    None => format!("{a}.{b}.{c}.0/24 — nothing answered like a ring"),
+                    None if !open.is_empty() => format!(
+                        "{a}.{b}.{c}.0/24 — port 81 open on {} but no ring answered STATE? (LED Lab connected, or the ring's client slots are full)",
+                        listeners.join(", ")
+                    ),
+                    None => format!("{a}.{b}.{c}.0/24 — nothing on port 81 at all"),
                 },
             );
             if let Some(ip) = hit {
@@ -1016,13 +1077,22 @@ pub fn discover(host: &str) -> DiscoveryReport {
         remember_ip(host, ip);
         rep.found = ip.to_string();
     } else {
-        rep.hint = if local.is_none() {
-            "Join the same WiFi as the ring, then try again.".into()
-        } else {
-            "The ring did not answer anywhere on this network. Check the ring is powered and on this WiFi. \
-             If it works from another Mac, macOS is probably blocking this app's local-network access: \
-             System Settings → Privacy & Security → Local Network → allow Dev Pilot Board, then try again."
-                .into()
+        rep.hint = match (local, lan) {
+            (None, _) => "Join the same WiFi as the ring, then try again.".into(),
+            (_, LanVerdict::Blocked) => "macOS is blocking this app's local-network access. Open System Settings → \
+                 Privacy & Security → Local Network and switch Dev Pilot Board on. If it is not listed, quit and \
+                 reopen the app so macOS asks; then press Find my ring again. Plugging the ring in over USB works \
+                 without any of this."
+                .into(),
+            (_, LanVerdict::Reachable) => "This Mac reaches the router but nothing else on the WiFi. Typical causes: \
+                 the router isolates clients from each other (AP/client isolation or a guest network), or the ring \
+                 is on a different band/VLAN. Plugging the ring in over USB works without any of this."
+                .into(),
+            (_, LanVerdict::Silent) => "The ring did not answer anywhere on this network. Check that it is powered \
+                 and on this WiFi (its light shows rainbow while unconfigured). If it works from another Mac, \
+                 check System Settings → Privacy & Security → Local Network for Dev Pilot Board. Plugging the ring \
+                 in over USB works without any of this."
+                .into(),
         };
     }
     rep

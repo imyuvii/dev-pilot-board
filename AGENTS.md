@@ -94,7 +94,12 @@ dashboard as fake sessions:
   at most once a minute (two passes, 500ms connects — 300ms missed a busy ring once).
   Settings → LED has a **Find my ring** button (`led_discover` command → `discover()`)
   that runs every rung and shows each result in the panel, so a user on another Mac
-  never needs `DPB_LED_DEBUG` or a terminal. Live check without hardware assumptions:
+  never needs `DPB_LED_DEBUG` or a terminal. It also probes the default gateway: macOS
+  15+ answers "No route to host" (EHOSTUNREACH) for *every* LAN address when the per-app
+  **Local Network** permission is denied, and that is what a second Mac showed — LAN
+  address fine, whole /24 sweep empty. `src-tauri/Info.plist` (merged by Tauri) carries
+  `NSLocalNetworkUsageDescription` so the prompt is worded and the app is listed under
+  Privacy & Security. USB needs none of this. Live check without hardware assumptions:
   `cargo test --lib -- --ignored --nocapture` (needs the ring on the LAN; delete the
   cache file it leaves behind).
 - **Opening the USB serial port resets an ESP32** (DTR/RTS → auto-reset). `connect_usb`

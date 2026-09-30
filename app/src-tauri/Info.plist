@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged into the bundle's Info.plist by Tauri. macOS 15+ gates access to
+       other devices on the LAN (the LED ring) behind a per-app permission; this
+       string is what the prompt shows. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Dev Pilot Board looks for your LED ring on the local network so it can mirror your agents' status on it.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_http._tcp</string>
+    <string>_ws._tcp</string>
+  </array>
+</dict>
+</plist>

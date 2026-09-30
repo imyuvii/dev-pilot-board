@@ -113,6 +113,8 @@ busiest session as one colour and one pattern.
   The host is found without relying on the Mac's resolver: getaddrinfo, then the app's own
   mDNS query, then the last known address, then a sweep of the local /24 for a device that
   answers the ring protocol — so a machine whose `.local` lookups are broken still connects.
+  Settings → LED offers **Find my ring**, which runs every step on demand and shows what
+  each one found (or why nothing did, including the macOS Local Network permission hint).
   `auto` prefers WiFi and falls back to serial, then re-checks WiFi every 15s and releases
   the serial port when the ring reappears on the network — only one process can hold a
   serial port, and this app must not lock out LED Lab or `arduino-cli upload`.
@@ -142,6 +144,11 @@ busiest session as one colour and one pattern.
   under load; the app halves brightness (to a floor) instead of re-applying the value
   that caused it, reports "brightness reduced (check its power)" in Settings, and
   restores full brightness after five stable minutes.
+- **FR-20f2** Several machines may share one ring. An app with nothing to show never
+  blanks a ring another machine lit; an app with something to show yields to an equal or
+  more urgent status already on the ring and overrides a dark ring, a less urgent status,
+  or anything it does not recognise (firmware defaults, LED Lab). Settings reports
+  "showing another Mac's status" while yielding.
 - **FR-20g** Strictly optional, and off by default. `notify.sh` has no knowledge of the
   ring. With `led.enabled` false nothing probes mDNS and no serial port is opened. No
   board, no network, or a port held by another app are all silent retries with backoff;

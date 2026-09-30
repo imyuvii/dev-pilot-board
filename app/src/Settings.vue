@@ -7,7 +7,7 @@ import {
   exists,
   BaseDirectory,
 } from "@tauri-apps/plugin-fs";
-import { ledDefaults, LED_EVENTS, PATTERNS, type LedCfg, type LedStatus } from "./led";
+import { ledDefaults, LED_EVENTS, PATTERNS, type DiscoveryReport, type LedCfg, type LedStatus } from "./led";
 
 const CONFIG_FILE = ".claude/notify-config.json";
 
@@ -67,6 +67,26 @@ async function refreshLed() {
     ledStatus.value = await invoke<LedStatus>("led_status");
   } catch {
     /* ignore — the ring is optional */
+  }
+}
+
+const finding = ref(false);
+const report = ref<DiscoveryReport | null>(null);
+
+/** Run the whole discovery ladder once and show what every rung saw. */
+async function findRing() {
+  if (finding.value) return;
+  finding.value = true;
+  report.value = null;
+  try {
+    report.value = await invoke<DiscoveryReport>("led_discover", { host: config.value.led.host });
+  } catch (e) {
+    report.value = {
+      version: "", host: config.value.led.host, local_ip: "", steps: [],
+      found: "", hint: `Could not run the search: ${String(e)}`,
+    };
+  } finally {
+    finding.value = false;
   }
 }
 
@@ -259,6 +279,23 @@ function setTone(key: string, ev: globalThis.Event) {
         <div class="times" v-if="config.led.transport !== 'usb'">
           <span class="mono-label">HOST</span>
           <input v-model="config.led.host" spellcheck="false" placeholder="ledring.local" />
+          <button class="mini" :disabled="finding" @click="findRing">
+            {{ finding ? "Searching…" : "Find my ring" }}
+          </button>
+        </div>
+        <div class="find" v-if="report && config.led.transport !== 'usb'">
+          <div v-for="st in report.steps" :key="st.label" class="find-step">
+            <span class="find-mark" :class="{ ok: st.ok }">{{ st.ok ? "✓" : "✕" }}</span>
+            <span class="find-label">{{ st.label }}</span>
+            <span class="find-detail">{{ st.detail }}</span>
+          </div>
+          <div class="find-result" :class="{ ok: !!report.found }">
+            <template v-if="report.found">
+              Ring found at {{ report.found }} — the app connects to it by itself; nothing to type.
+            </template>
+            <template v-else>{{ report.hint }}</template>
+            <span class="find-ver" v-if="report.version">v{{ report.version }}</span>
+          </div>
         </div>
         <div class="times">
           <span class="mono-label">BRIGHT</span>
@@ -390,6 +427,30 @@ function setTone(key: string, ev: globalThis.Event) {
 }
 .swatch::-webkit-color-swatch-wrapper { padding: 2px; }
 .swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+
+.mini {
+  font: 600 11px -apple-system, system-ui, sans-serif; color: var(--ink);
+  background: var(--card2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 5px 9px; cursor: pointer; white-space: nowrap;
+}
+.mini:hover:not(:disabled) { border-color: var(--accent); }
+.mini:disabled { opacity: 0.6; cursor: default; }
+
+.find { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 10px; }
+.find-step {
+  display: grid; grid-template-columns: 14px 150px 1fr; gap: 6px; align-items: baseline;
+  font-size: 11.5px; color: var(--ink3);
+}
+.find-mark { font-weight: 700; color: var(--toggleOff); }
+.find-mark.ok { color: var(--accent); }
+.find-label { color: var(--ink); }
+.find-detail { overflow-wrap: anywhere; }
+.find-result {
+  margin-top: 4px; font-size: 11.5px; color: var(--ink); line-height: 1.4;
+  background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+}
+.find-result.ok { border-color: var(--accent); }
+.find-ver { float: right; font: 600 9.5px "Geist Mono", monospace; color: var(--ink3); margin-left: 8px; }
 
 .led-status {
   display: flex; align-items: center; gap: 7px;

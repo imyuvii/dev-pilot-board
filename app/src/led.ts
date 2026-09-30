@@ -34,6 +34,24 @@ export interface LedStatus {
   detail: string;
 }
 
+/** One rung of the discovery ladder, as returned by the `led_discover` command. */
+export interface DiscoveryStep {
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface DiscoveryReport {
+  version: string;
+  host: string;
+  local_ip: string;
+  steps: DiscoveryStep[];
+  /** Address the ring answered on; empty when nothing was found. */
+  found: string;
+  /** What to try next; empty when found. */
+  hint: string;
+}
+
 /**
  * Ranked most urgent first — the ring shows one thing, and this is the order.
  * KEEP IN SYNC with `LADDER` in led.rs (defaults, order, which are one-off).

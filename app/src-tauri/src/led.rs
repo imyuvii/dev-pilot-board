@@ -58,6 +58,38 @@ pub struct LedState {
     pub color2: String,
     pub speed: u8,
     pub bright: u8,
+    /// Position on the LADDER (0 = most urgent); `OFF_RANK` when there is
+    /// nothing to show. Lets us judge another client's state against ours.
+    pub rank: usize,
+    /// Every rung's configured look, so a STATE reply can be mapped back to a
+    /// rung — that is how we recognise another Mac's status on a shared ring.
+    pub looks: Vec<Look>,
+}
+
+const OFF_RANK: usize = usize::MAX;
+
+impl LedState {
+    fn is_off(&self) -> bool {
+        self.rank == OFF_RANK
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Look {
+    pub rank: usize,
+    pub pattern: String,
+    pub color: String,
+}
+
+/// What the ring is showing, judged on our ladder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RingSeen {
+    Off,
+    /// A rung we recognise by pattern + colour — almost certainly another
+    /// Dev Pilot Board on the same network.
+    Rung(usize),
+    /// Firmware defaults after a reboot, LED Lab, a serial console…
+    Foreign,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -421,9 +453,12 @@ fn compute_target() -> Option<LedState> {
         return None;
     }
     let now = chrono::Utc::now().timestamp();
-    let picked = pick_event(&read_events(), now, &cfg).and_then(rung);
+    let picked = pick_event(&read_events(), now, &cfg);
+    let rank = picked
+        .and_then(|e| LADDER.iter().position(|r| r.event == e))
+        .unwrap_or(OFF_RANK);
 
-    let (pattern, color, speed, scale) = match picked {
+    let (pattern, color, speed, scale) = match picked.and_then(rung) {
         Some(r) => {
             let look = cfg.events.get(r.event);
             (
@@ -435,6 +470,18 @@ fn compute_target() -> Option<LedState> {
         }
         None => ("off".to_string(), "000000".to_string(), 50, 1.0),
     };
+    let looks = LADDER
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let look = cfg.events.get(r.event);
+            Look {
+                rank: i,
+                pattern: look.map(|l| l.pattern.clone()).unwrap_or_else(|| r.pattern.to_string()),
+                color: look.map(|l| l.color.clone()).unwrap_or_else(|| r.color.to_string()),
+            }
+        })
+        .collect();
 
     let mut bright = (cfg.brightness.min(MAX_BRIGHT) as f32 * scale).round() as u8;
     // Quiet hours dim rather than blank: a dark ring is indistinguishable from
@@ -456,6 +503,8 @@ fn compute_target() -> Option<LedState> {
         color2: "000000".to_string(),
         speed,
         bright,
+        rank,
+        looks,
     })
 }
 
@@ -605,8 +654,11 @@ const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const MDNS_WAIT: Duration = Duration::from_millis(800);
 /// A TCP connect to a silent address burns the whole timeout; keep it short
-/// and run many in parallel so a /24 sweep finishes in a couple of seconds.
-const SCAN_TIMEOUT: Duration = Duration::from_millis(300);
+/// and run many in parallel so a /24 sweep finishes in a few seconds. 300ms
+/// missed a ring that was busy serving another client, hence 500 and a
+/// second pass.
+const SCAN_TIMEOUT: Duration = Duration::from_millis(500);
+const SCAN_PASSES: usize = 2;
 const SCAN_THREADS: usize = 32;
 /// Sweeping the LAN is the noisy last resort — never more often than this.
 const SCAN_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -764,6 +816,10 @@ fn is_ring(ip: Ipv4Addr) -> bool {
 }
 
 fn scan_subnet(local: Ipv4Addr) -> Option<Ipv4Addr> {
+    (0..SCAN_PASSES).find_map(|_| scan_subnet_once(local))
+}
+
+fn scan_subnet_once(local: Ipv4Addr) -> Option<Ipv4Addr> {
     let [a, b, c, me] = local.octets();
     let hosts: Vec<Ipv4Addr> = (1..=254u8)
         .filter(|&d| d != me)
@@ -836,6 +892,187 @@ fn resolve_ring(host: &str) -> Option<Ipv4Addr> {
         }
     }
     None
+}
+
+/// One rung of the discovery ladder as the Settings panel shows it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct DiscoveryStep {
+    pub label: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct DiscoveryReport {
+    pub version: String,
+    pub host: String,
+    pub local_ip: String,
+    pub steps: Vec<DiscoveryStep>,
+    /// Address the ring answered on, if any rung found one.
+    pub found: String,
+    /// What to try next when nothing was found. Empty when found.
+    pub hint: String,
+}
+
+/// Run every rung of the ladder and say what each one saw — the on-screen
+/// version of `DPB_LED_DEBUG=1`, so a user on another Mac never needs a
+/// terminal to learn why the ring is dark. Unlike `resolve_ring` it does not
+/// stop at the first hit and ignores the sweep rate limit (it is user-driven).
+pub fn discover(host: &str) -> DiscoveryReport {
+    let mut rep = DiscoveryReport {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        host: host.to_string(),
+        ..Default::default()
+    };
+    let mut step = |label: &str, ok: bool, detail: String| {
+        rep.steps.push(DiscoveryStep { label: label.into(), ok, detail });
+    };
+    let mut found: Option<Ipv4Addr> = None;
+
+    let local = local_ipv4();
+    rep.local_ip = local.map(|ip| ip.to_string()).unwrap_or_default();
+    step(
+        "This Mac's network",
+        local.is_some(),
+        match local {
+            Some(ip) => format!("On {ip}"),
+            None => "No LAN address — WiFi off, or every route goes through a VPN".into(),
+        },
+    );
+
+    if let Ok(IpAddr::V4(ip)) = host.parse::<IpAddr>() {
+        let ok = is_ring(ip);
+        step("Configured address", ok, if ok { format!("{ip} answers like a ring") } else { format!("{ip} does not answer on port {WS_PORT}") });
+        if ok {
+            found = Some(ip);
+        }
+    } else {
+        let sys = (host, WS_PORT).to_socket_addrs().ok().and_then(|mut it| {
+            it.find_map(|a| match a.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            })
+        });
+        step(
+            "macOS name lookup",
+            sys.is_some(),
+            match sys {
+                Some(ip) => format!("{host} → {ip}"),
+                None => format!("{host} does not resolve on this Mac (VPN or firewall blocking mDNS)"),
+            },
+        );
+        if let Some(ip) = sys {
+            found.get_or_insert(ip);
+        }
+
+        let own = mdns_query(host);
+        step(
+            "App's own mDNS query",
+            own.is_some(),
+            match own {
+                Some(ip) => format!("ring answered from {ip}"),
+                None => "no answer in 0.8s".into(),
+            },
+        );
+        if let Some(ip) = own {
+            found.get_or_insert(ip);
+        }
+
+        match cached_ip(host) {
+            Some(ip) => {
+                let ok = is_ring(ip);
+                step("Remembered address", ok, if ok { format!("{ip} still answers") } else { format!("{ip} no longer answers") });
+                if ok {
+                    found.get_or_insert(ip);
+                }
+            }
+            None => step("Remembered address", false, "none saved yet".into()),
+        }
+    }
+
+    match local {
+        Some(l) => {
+            if let Ok(mut t) = LAST_SCAN.lock() {
+                *t = Some(Instant::now());
+            }
+            let [a, b, c, _] = l.octets();
+            let hit = scan_subnet(l);
+            step(
+                "Sweep of the local network",
+                hit.is_some(),
+                match hit {
+                    Some(ip) => format!("{a}.{b}.{c}.0/24 — ring found at {ip}"),
+                    None => format!("{a}.{b}.{c}.0/24 — nothing answered like a ring"),
+                },
+            );
+            if let Some(ip) = hit {
+                found.get_or_insert(ip);
+            }
+        }
+        None => step("Sweep of the local network", false, "skipped — no LAN address".into()),
+    }
+
+    if let Some(ip) = found {
+        remember_ip(host, ip);
+        rep.found = ip.to_string();
+    } else {
+        rep.hint = if local.is_none() {
+            "Join the same WiFi as the ring, then try again.".into()
+        } else {
+            "The ring did not answer anywhere on this network. Check the ring is powered and on this WiFi. \
+             If it works from another Mac, macOS is probably blocking this app's local-network access: \
+             System Settings → Privacy & Security → Local Network → allow Dev Pilot Board, then try again."
+                .into()
+        };
+    }
+    rep
+}
+
+#[tauri::command]
+pub async fn led_discover(host: String) -> DiscoveryReport {
+    let host = if host.trim().is_empty() { Cfg::default().host } else { host.trim().to_string() };
+    tauri::async_runtime::spawn_blocking(move || discover(&host))
+        .await
+        .unwrap_or_default()
+}
+
+// ------------------------------------------------------------- shared ring
+//
+// One ring, several Macs. Each app used to treat any mismatch as drift and
+// re-assert its own view every 5s, so an idle laptop forced the ring dark
+// while the desktop was mid-task (seen for real). Rules now:
+//   * nothing to show → never blank a ring another client lit; only blank
+//     what we lit ourselves, or firmware defaults after a reboot
+//   * something to show → yield to a recognised status that is as urgent or
+//     more urgent than ours; override a dark ring, a less urgent status, or
+//     anything foreign (reboot defaults, LED Lab)
+// Recognition is by pattern + colour against our own configured looks, so
+// two Macs with the same defaults agree; a custom colour on one Mac makes it
+// "foreign" to the other and falls back to the old override behaviour.
+
+fn ring_seen(line: &str, looks: &[Look]) -> Option<RingSeen> {
+    let json = line.strip_prefix("STATE ")?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let mode = v.get("mode")?.as_str()?;
+    if mode == "off" {
+        return Some(RingSeen::Off);
+    }
+    let color = v.get("color").and_then(|x| x.as_str()).unwrap_or("");
+    Some(
+        looks
+            .iter()
+            .find(|l| l.pattern == mode && l.color == color)
+            .map_or(RingSeen::Foreign, |l| RingSeen::Rung(l.rank)),
+    )
+}
+
+/// Given what the ring shows (and that it is not our own state), leave it?
+fn yields_to(target: &LedState, seen: RingSeen) -> bool {
+    match seen {
+        RingSeen::Off => false,
+        RingSeen::Foreign => false,
+        RingSeen::Rung(k) => target.is_off() || k <= target.rank,
+    }
 }
 
 fn connect_wifi(host: &str) -> Option<Conn> {
@@ -1017,6 +1254,10 @@ fn run() {
     let mut next_wifi_check = Instant::now() + WIFI_RECHECK;
     let mut next_probe = Instant::now();
     let mut cached: Option<LedState> = None;
+    // Last STATE reply, judged on our ladder, and whether it was our own state.
+    let mut ring: Option<RingSeen> = None;
+    let mut ring_ours = false;
+    let mut yielding = false;
     let mut next_compute = Instant::now();
     // Brownout guard, see `brownout_note` below.
     let mut connects: Vec<Instant> = Vec::new();
@@ -1130,22 +1371,59 @@ fn run() {
         }
 
         if let Some(c) = conn.as_mut() {
-            let mut failed = emit(c, &target, &sent).is_err();
-            if !failed {
+            let label = c.label();
+            // Nothing to show: blank only a ring we lit ourselves (or one on
+            // firmware defaults). One another Mac lit — or one we have not
+            // heard from yet — is left alone.
+            let hold_off = target.is_off()
+                && match ring {
+                    None | Some(RingSeen::Off) => true,
+                    Some(RingSeen::Rung(_)) => !ring_ours,
+                    Some(RingSeen::Foreign) => false,
+                };
+            let mut failed = false;
+            if hold_off {
                 sent = Some(target.clone());
-                // Ask what the ring is really showing, on a slower cadence than
-                // the loop so it costs one small message every few seconds.
-                if Instant::now() >= next_probe {
-                    next_probe = Instant::now() + RESYNC_PROBE;
-                    failed = c.write_line("STATE?").is_err();
+            } else {
+                failed = emit(c, &target, &sent).is_err();
+                if !failed {
+                    sent = Some(target.clone());
                 }
+            }
+            // Ask what the ring is really showing, on a slower cadence than
+            // the loop so it costs one small message every few seconds.
+            if !failed && Instant::now() >= next_probe {
+                next_probe = Instant::now() + RESYNC_PROBE;
+                failed = c.write_line("STATE?").is_err();
             }
             if !failed {
                 match c.drain() {
                     Ok(lines) => {
                         for l in &lines {
-                            if state_matches(l, &target) == Some(false) {
+                            let Some(seen) = ring_seen(l, &target.looks) else { continue };
+                            ring = Some(seen);
+                            ring_ours = state_matches(l, &target) == Some(true);
+                            let dark_as_wanted = target.is_off() && seen == RingSeen::Off;
+                            if ring_ours || dark_as_wanted {
+                                if yielding {
+                                    yielding = false;
+                                    set_status(true, label, &brownout_note(label, brownout_div));
+                                }
+                                continue;
+                            }
+                            if yields_to(&target, seen) {
+                                if !yielding {
+                                    yielding = true;
+                                    dbg(&format!("ring shows another client's status, leaving it: {l}"));
+                                    set_status(
+                                        true,
+                                        label,
+                                        &format!("{} — showing another Mac's status", brownout_note(label, brownout_div)),
+                                    );
+                                }
+                            } else {
                                 dbg(&format!("ring drifted, re-asserting: {l}"));
+                                yielding = false;
                                 sent = None; // forces a full re-emit next turn
                             }
                         }
@@ -1158,6 +1436,9 @@ fn run() {
                 // Dropping `conn` closes the socket / releases the serial port.
                 conn = None;
                 sent = None;
+                ring = None;
+                ring_ours = false;
+                yielding = false;
                 fails = fails.saturating_add(1);
                 next_try = Instant::now() + backoff(fails);
                 set_status(false, "", "Ring disconnected — will keep looking");
@@ -1178,6 +1459,59 @@ mod tests {
     }
     fn pick(e: &[(i64, String, String)]) -> Option<&'static str> {
         pick_event(e, NOW, &Cfg::default())
+    }
+
+    fn default_looks() -> Vec<Look> {
+        LADDER
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Look { rank: i, pattern: r.pattern.into(), color: r.color.into() })
+            .collect()
+    }
+
+    fn target(rank: usize) -> LedState {
+        LedState {
+            transport: "auto".into(),
+            host: "h".into(),
+            pattern: "x".into(),
+            color: "000000".into(),
+            color2: "000000".into(),
+            speed: 50,
+            bright: 5,
+            rank,
+            looks: default_looks(),
+        }
+    }
+
+    #[test]
+    fn ring_state_is_recognised_on_our_ladder() {
+        let looks = default_looks();
+        let q = LADDER.iter().position(|r| r.event == "question").unwrap();
+        let line = format!(r#"STATE {{"mode":"{}","bright":5,"speed":75,"color":"{}"}}"#, LADDER[q].pattern, LADDER[q].color);
+        assert_eq!(ring_seen(&line, &looks), Some(RingSeen::Rung(q)));
+        assert_eq!(ring_seen(r#"STATE {"mode":"off","color":"000000"}"#, &looks), Some(RingSeen::Off));
+        assert_eq!(ring_seen(r#"STATE {"mode":"rainbow","color":"ff0000"}"#, &looks), Some(RingSeen::Foreign));
+        // Same pattern, someone else's colour: not one of ours.
+        let line = format!(r#"STATE {{"mode":"{}","color":"123456"}}"#, LADDER[q].pattern);
+        assert_eq!(ring_seen(&line, &looks), Some(RingSeen::Foreign));
+        assert_eq!(ring_seen("OK mode off", &looks), None);
+    }
+
+    #[test]
+    fn shared_ring_yields_to_equal_or_more_urgent_status_only() {
+        let q = LADDER.iter().position(|r| r.event == "question").unwrap();
+        let w = LADDER.iter().position(|r| r.event == "working").unwrap();
+        // Idle Mac: never fights a lit ring, does clear reboot defaults.
+        assert!(yields_to(&target(OFF_RANK), RingSeen::Rung(w)));
+        assert!(!yields_to(&target(OFF_RANK), RingSeen::Foreign));
+        // Working Mac yields to another Mac's question, and to another
+        // Mac's working (equal rank — no flicker), but not to a dark ring.
+        assert!(yields_to(&target(w), RingSeen::Rung(q)));
+        assert!(yields_to(&target(w), RingSeen::Rung(w)));
+        assert!(!yields_to(&target(w), RingSeen::Off));
+        assert!(!yields_to(&target(w), RingSeen::Foreign));
+        // A question overrides another Mac's working.
+        assert!(!yields_to(&target(q), RingSeen::Rung(w)));
     }
 
     #[test]
@@ -1283,6 +1617,15 @@ mod tests {
         assert_eq!(via_scan, via_mdns);
         assert_eq!(fallback, via_mdns);
         assert!(via_mdns.map(is_ring).unwrap_or(false));
+        let rep = discover("ledring.local");
+        for st in &rep.steps {
+            eprintln!("  [{}] {:<28} {}", if st.ok { "ok" } else { "--" }, st.label, st.detail);
+        }
+        eprintln!("found={} hint={:?}", rep.found, rep.hint);
+        assert_eq!(rep.found, via_mdns.unwrap().to_string());
+        assert!(rep.hint.is_empty());
+        let miss = discover("nosuchring.local");
+        assert_eq!(miss.found, rep.found, "bogus name must still end at the ring via the sweep");
     }
 
     #[test]
@@ -1373,6 +1716,8 @@ mod tests {
             color2: "000000".into(),
             speed: 45,
             bright: 60,
+            rank: 1,
+            looks: vec![],
         };
         let good = r#"STATE {"mode":"breathe","bright":60,"speed":45,"color":"ffb000","color2":"000000"}"#;
         assert_eq!(state_matches(good, &want), Some(true));

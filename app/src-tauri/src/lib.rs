@@ -129,7 +129,8 @@ pub fn run() {
             play_sound,
             hooks_status,
             setup_hooks,
-            led::led_status
+            led::led_status,
+            led::led_discover
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

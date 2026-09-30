@@ -91,7 +91,10 @@ dashboard as fake sessions:
   IP literal → getaddrinfo → own legacy-unicast mDNS query (RFC 6762 §6.7, answered
   straight to our ephemeral port) → remembered IP (`~/.claude/notify-led-cache.json`,
   re-verified) → /24 sweep for a port-81 listener that answers `STATE?`. The sweep runs
-  at most once a minute. Live check without hardware assumptions:
+  at most once a minute (two passes, 500ms connects — 300ms missed a busy ring once).
+  Settings → LED has a **Find my ring** button (`led_discover` command → `discover()`)
+  that runs every rung and shows each result in the panel, so a user on another Mac
+  never needs `DPB_LED_DEBUG` or a terminal. Live check without hardware assumptions:
   `cargo test --lib -- --ignored --nocapture` (needs the ring on the LAN; delete the
   cache file it leaves behind).
 - **Opening the USB serial port resets an ESP32** (DTR/RTS → auto-reset). `connect_usb`
@@ -100,6 +103,15 @@ dashboard as fake sessions:
 - **`MODE` restarts the effect** (the firmware zeroes its step counter and blanks the
   ring), so `emit()` diffs against the last sent state. Re-sending it every loop freezes
   every animation on frame one.
+- **Several Macs can share one ring — and used to fight over it.** Each app re-asserted
+  its own view on any `STATE?` mismatch, so an idle laptop forced the ring dark every 5s
+  while the desktop was mid-task (reproduced with two Macs). `ring_seen`/`yields_to` in
+  `led.rs` now map the ring's pattern+colour back onto our ladder: an app with nothing to
+  show never blanks a ring it did not light (only its own state or firmware defaults), and
+  a lit app yields to a recognised status that is equal or more urgent. Settings says
+  "showing another Mac's status" while yielding. Recognition relies on both Macs using the
+  same per-event colours; a custom colour reads as foreign and gets overridden as before.
+  Both Macs must run ≥ 0.3.2 for this — an older app still fights.
 - **A status light must never show a stale colour.** `led.rs` sends `STATE?` every 5s and
   compares the reply, because the ring drifts for reasons no write error reveals: it
   reboots onto firmware defaults, or LED Lab changes the mode underneath. Consequence to

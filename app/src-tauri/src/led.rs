@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -160,21 +160,23 @@ struct Rung {
 /// src/led.ts (labels + defaults) and `STATUS_MAP` in App.vue (which events
 /// count as which standing status).
 ///
-/// The ring is a *notification* light, not a status light: by default it is
-/// dark unless something happened in the last TRANSIENT_HOLD_SECS, or an agent
-/// is waiting on the user / asked a question — those two stay lit until the
-/// user responds, because an unanswered notification is still a notification.
+/// Defaults mirror the author's day-to-day setup: a dim ring that shows blue
+/// while an agent works, chases magenta on a question, flickers red on a
+/// failure and breathes green for 30s when a response finishes. `waiting` and
+/// `task-done` are off because with `working` lit the ring is already busy;
+/// they stay available in Settings. Question/waiting hold until answered
+/// because an unanswered notification is still a notification.
 const LADDER: &[Rung] = &[
-    Rung { event: "question",      enabled: true,  color: "ff00aa", pattern: "breathe", speed: 75, scale: 1.0,  transient: false },
-    Rung { event: "waiting",       enabled: true,  color: "ffb000", pattern: "breathe", speed: 45, scale: 1.0,  transient: false },
-    Rung { event: "failure",       enabled: true,  color: "ff2020", pattern: "solid",   speed: 50, scale: 1.0,  transient: true },
-    Rung { event: "task-done",     enabled: true,  color: "00d8ff", pattern: "sparkle", speed: 60, scale: 1.0,  transient: true },
+    Rung { event: "question",      enabled: true,  color: "ff00aa", pattern: "chase", speed: 75, scale: 1.0,  transient: false },
+    Rung { event: "waiting",       enabled: false,  color: "0061ff", pattern: "chase", speed: 45, scale: 1.0,  transient: false },
+    Rung { event: "failure",       enabled: true,  color: "ff2020", pattern: "fire",   speed: 50, scale: 1.0,  transient: true },
+    Rung { event: "task-done",     enabled: false,  color: "00d8ff", pattern: "juggle", speed: 60, scale: 1.0,  transient: true },
     Rung { event: "compact",       enabled: false, color: "9b59b6", pattern: "breathe", speed: 40, scale: 1.0,  transient: true },
     Rung { event: "session-start", enabled: false, color: "ffffff", pattern: "chase",   speed: 70, scale: 1.0,  transient: true },
-    // `working` is a silent status event in notify.sh, not a notification, so it
-    // is off by default: the ring stays dark while an agent merely works.
-    Rung { event: "working",       enabled: false, color: "1e90ff", pattern: "comet",   speed: 65, scale: 1.0,  transient: false },
-    Rung { event: "stop",          enabled: true,  color: "00ff66", pattern: "solid",   speed: 30, scale: 1.0,  transient: true },
+    // `working` is a silent status event in notify.sh (no sound/banner); on the
+    // ring it is the "agent is busy" idle colour.
+    Rung { event: "working",       enabled: true, color: "1e90ff", pattern: "chase",   speed: 65, scale: 1.0,  transient: false },
+    Rung { event: "stop",          enabled: true,  color: "4f7a28", pattern: "breathe",   speed: 30, scale: 1.0,  transient: true },
 ];
 
 fn rung(event: &str) -> Option<&'static Rung> {
@@ -207,7 +209,7 @@ impl Default for Cfg {
             enabled: false,
             transport: "auto".into(),
             host: "ledring.local".into(),
-            brightness: 60,
+            brightness: 5,
             dim_in_quiet_hours: true,
             events: LADDER
                 .iter()
@@ -580,21 +582,276 @@ fn state_matches(line: &str, want: &LedState) -> Option<bool> {
     )
 }
 
-fn connect_wifi(host: &str) -> Option<Conn> {
-    // Resolve first so a dead mDNS name fails fast instead of inside connect().
-    // macOS resolves *.local through mDNSResponder in plain getaddrinfo.
-    let addr = (host, WS_PORT).to_socket_addrs().ok()?.next()?;
+// ----------------------------------------------------------------- discovery
+//
+// Finding the ring must not depend on the Mac's own resolver. `ledring.local`
+// goes through mDNSResponder, and a VPN client that hijacks DNS, a firewall
+// set to "block all incoming connections" or a switch that filters multicast
+// all break it silently: the ring is reachable, yet `ping ledring.local`
+// says "unknown host". Seen on a second Mac on the very same subnet. Ladder,
+// cheapest first:
+//   1. the configured host is already an IP
+//   2. the system resolver (getaddrinfo)
+//   3. our own mDNS query from an ephemeral port — RFC 6762 §6.7 "legacy
+//      unicast": the ring answers straight back to us, no multicast receive
+//      and no mDNSResponder involved
+//   4. the last IP that worked, if it still answers `STATE?` like a ring
+//   5. sweep the local /24 for a port-81 listener that answers `STATE?`
+// Whatever 3–5 find is remembered in ~/.claude/notify-led-cache.json so the
+// next launch skips the sweep. Same rules as everything else here: every
+// failure is a quiet `None`, never an error the user sees.
+
+const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_PORT: u16 = 5353;
+const MDNS_WAIT: Duration = Duration::from_millis(800);
+/// A TCP connect to a silent address burns the whole timeout; keep it short
+/// and run many in parallel so a /24 sweep finishes in a couple of seconds.
+const SCAN_TIMEOUT: Duration = Duration::from_millis(300);
+const SCAN_THREADS: usize = 32;
+/// Sweeping the LAN is the noisy last resort — never more often than this.
+const SCAN_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a candidate gets to prove it is a ring by answering `STATE?`.
+const PROBE_WAIT: Duration = Duration::from_millis(800);
+
+static LAST_SCAN: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn cache_path() -> std::path::PathBuf {
+    home().join(".claude/notify-led-cache.json")
+}
+
+/// Build a DNS A query for `name` as mDNS wants it: id 0, no flags, one
+/// question, class IN. Returns `None` for a name that is not a `.local` label
+/// sequence — unicast DNS names belong to the system resolver.
+fn mdns_packet(name: &str) -> Option<Vec<u8>> {
+    let name = name.trim_end_matches('.');
+    if !name.ends_with(".local") {
+        return None;
+    }
+    let mut q = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.push(0);
+    q.extend_from_slice(&[0, 1, 0, 1]); // QTYPE A, QCLASS IN
+    Some(q)
+}
+
+/// Read a (possibly compressed) DNS name at `i` into `out`; returns the index
+/// just past it in the *original* stream. Compression pointers are followed
+/// with a hop limit so a malicious packet cannot loop us.
+fn dns_name(buf: &[u8], mut i: usize, out: &mut String, hops: u8) -> Option<usize> {
+    if hops > 8 {
+        return None;
+    }
+    loop {
+        let len = *buf.get(i)? as usize;
+        if len == 0 {
+            return Some(i + 1);
+        }
+        if len & 0xC0 == 0xC0 {
+            let ptr = ((len & 0x3F) << 8) | *buf.get(i + 1)? as usize;
+            dns_name(buf, ptr, out, hops + 1)?;
+            return Some(i + 2);
+        }
+        let label = buf.get(i + 1..i + 1 + len)?;
+        if !out.is_empty() {
+            out.push('.');
+        }
+        out.push_str(&String::from_utf8_lossy(label));
+        i += 1 + len;
+    }
+}
+
+/// Pull the first A record for `want` out of a DNS/mDNS response.
+fn mdns_answer(buf: &[u8], want: &str) -> Option<Ipv4Addr> {
+    if buf.len() < 12 || buf[2] & 0x80 == 0 {
+        return None; // not a response
+    }
+    let qd = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let an = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let want = want.trim_end_matches('.');
+    let mut i = 12;
+    for _ in 0..qd {
+        i = dns_name(buf, i, &mut String::new(), 0)? + 4;
+    }
+    for _ in 0..an {
+        let mut name = String::new();
+        i = dns_name(buf, i, &mut name, 0)?;
+        let ty = u16::from_be_bytes([*buf.get(i)?, *buf.get(i + 1)?]);
+        let rdlen = u16::from_be_bytes([*buf.get(i + 8)?, *buf.get(i + 9)?]) as usize;
+        let rd = buf.get(i + 10..i + 10 + rdlen)?;
+        if ty == 1 && rdlen == 4 && name.eq_ignore_ascii_case(want) {
+            return Some(Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]));
+        }
+        i += 10 + rdlen;
+    }
+    None
+}
+
+fn mdns_query(host: &str) -> Option<Ipv4Addr> {
+    let q = mdns_packet(host)?;
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    sock.set_read_timeout(Some(MDNS_WAIT)).ok()?;
+    sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).ok()?;
+    let deadline = Instant::now() + MDNS_WAIT;
+    let mut buf = [0u8; 1500];
+    while Instant::now() < deadline {
+        let Ok((n, _)) = sock.recv_from(&mut buf) else { break };
+        if let Some(ip) = mdns_answer(&buf[..n], host) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn cached_ip(host: &str) -> Option<Ipv4Addr> {
+    let text = std::fs::read_to_string(cache_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if v.get("host")?.as_str()? != host {
+        return None;
+    }
+    v.get("ip")?.as_str()?.parse().ok()
+}
+
+fn remember_ip(host: &str, ip: Ipv4Addr) {
+    let v = serde_json::json!({ "host": host, "ip": ip.to_string() });
+    let _ = std::fs::write(cache_path(), v.to_string());
+}
+
+/// The interface the default route leaves by — that is the LAN the ring is
+/// on. A UDP connect sends nothing; it only asks the kernel to pick a source.
+fn local_ipv4() -> Option<Ipv4Addr> {
+    let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((Ipv4Addr::new(1, 1, 1, 1), 53)).ok()?;
+    match s.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if ip.is_private() => Some(ip),
+        _ => None,
+    }
+}
+
+fn ws_open(addr: SocketAddr, host: &str) -> Option<WebSocket<TcpStream>> {
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
     stream.set_nodelay(true).ok();
     // Handshake on a blocking stream: a read timeout here would surface as a
     // spurious Interrupted handshake error.
     let (ws, _resp) = tungstenite::client::client(format!("ws://{host}:{WS_PORT}/"), stream).ok()?;
+    Some(ws)
+}
+
+/// A port-81 listener is only a ring if it talks the ring's protocol.
+fn is_ring(ip: Ipv4Addr) -> bool {
+    let addr = SocketAddr::new(IpAddr::V4(ip), WS_PORT);
+    let Some(mut ws) = ws_open(addr, &ip.to_string()) else { return false };
+    if ws.get_ref().set_read_timeout(Some(PROBE_WAIT)).is_err() {
+        return false;
+    }
+    if ws.send(Message::Text("STATE?".into())).is_err() {
+        return false;
+    }
+    // The firmware may greet first; allow a few frames before giving up.
+    for _ in 0..4 {
+        match ws.read() {
+            Ok(Message::Text(t)) if t.starts_with("STATE ") => return true,
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn scan_subnet(local: Ipv4Addr) -> Option<Ipv4Addr> {
+    let [a, b, c, me] = local.octets();
+    let hosts: Vec<Ipv4Addr> = (1..=254u8)
+        .filter(|&d| d != me)
+        .map(|d| Ipv4Addr::new(a, b, c, d))
+        .collect();
+    let open: Mutex<Vec<Ipv4Addr>> = Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for chunk in hosts.chunks(hosts.len().div_ceil(SCAN_THREADS)) {
+            let open = &open;
+            s.spawn(move || {
+                for &ip in chunk {
+                    let addr = SocketAddr::new(IpAddr::V4(ip), WS_PORT);
+                    if TcpStream::connect_timeout(&addr, SCAN_TIMEOUT).is_ok() {
+                        if let Ok(mut o) = open.lock() {
+                            o.push(ip);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut open = open.into_inner().ok()?;
+    open.sort();
+    dbg(&format!("scan {a}.{b}.{c}.0/24: port 81 open on {open:?}"));
+    open.into_iter().find(|&ip| is_ring(ip))
+}
+
+/// Turn the configured host into an address the ring actually answers on.
+fn resolve_ring(host: &str) -> Option<Ipv4Addr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        };
+    }
+    if let Some(ip) = (host, WS_PORT)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.find_map(|a| match a.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            _ => None,
+        }))
+    {
+        return Some(ip);
+    }
+    if let Some(ip) = mdns_query(host) {
+        dbg(&format!("system resolver failed, own mDNS query found {host} at {ip}"));
+        remember_ip(host, ip);
+        return Some(ip);
+    }
+    if let Some(ip) = cached_ip(host) {
+        if is_ring(ip) {
+            dbg(&format!("using remembered address {ip} for {host}"));
+            return Some(ip);
+        }
+    }
+    let due = LAST_SCAN
+        .lock()
+        .ok()
+        .map(|t| t.map_or(true, |t| t.elapsed() >= SCAN_MIN_INTERVAL))
+        .unwrap_or(false);
+    if due {
+        if let Ok(mut t) = LAST_SCAN.lock() {
+            *t = Some(Instant::now());
+        }
+        if let Some(ip) = local_ipv4().and_then(scan_subnet) {
+            dbg(&format!("subnet sweep found a ring at {ip}, remembering it for {host}"));
+            remember_ip(host, ip);
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn connect_wifi(host: &str) -> Option<Conn> {
+    let ip = resolve_ring(host)?;
+    let ws = ws_open(SocketAddr::new(IpAddr::V4(ip), WS_PORT), host)?;
     if let Ok(()) = ws.get_ref().set_read_timeout(Some(DRAIN_WINDOW)) {
+        if let Ok(mut s) = LAST_WIFI_IP.lock() {
+            *s = Some(ip.to_string());
+        }
         Some(Conn::Ws(ws))
     } else {
         None
     }
 }
+
+static LAST_WIFI_IP: Mutex<Option<String>> = Mutex::new(None);
 
 /// macOS exposes both /dev/tty.* (blocks until carrier detect) and /dev/cu.*
 /// (callout, what we want) for the same device. Normalise to cu and dedupe.
@@ -713,9 +970,12 @@ fn emit(conn: &mut Conn, want: &LedState, sent: &Option<LedState>) -> Result<(),
 /// of looking like the brightness slider is broken.
 fn brownout_note(label: &str, div: u8) -> String {
     let base = if label == "wifi" {
-        "Connected over WiFi"
+        match LAST_WIFI_IP.lock().ok().and_then(|s| s.clone()) {
+            Some(ip) => format!("Connected over WiFi ({ip})"),
+            None => "Connected over WiFi".to_string(),
+        }
     } else {
-        "Connected over USB"
+        "Connected over USB".to_string()
     };
     if div > 1 {
         format!("{base} — ring keeps resetting, brightness reduced (check its power)")
@@ -813,7 +1073,7 @@ fn run() {
                 dbg("wifi is back, releasing the serial port");
                 conn = Some(ws);
                 sent = None;
-                set_status(true, "wifi", "Connected over WiFi");
+                set_status(true, "wifi", &brownout_note("wifi", 1));
             }
         }
 
@@ -949,42 +1209,120 @@ mod tests {
     #[test]
     fn waiting_outranks_failure_and_working() {
         let e = [ev(5, "working", "s1"), ev(4, "failure", "s2"), ev(3, "waiting", "s3")];
-        assert_eq!(pick(&e), Some("waiting"));
+        assert_eq!(pick_event(&e, NOW, &all_on()), Some("waiting"));
+    }
+
+    /// Ranking tests must not depend on which rungs happen to default on.
+    fn all_on() -> Cfg {
+        let mut cfg = Cfg::default();
+        for look in cfg.events.values_mut() {
+            look.enabled = true;
+        }
+        cfg
     }
 
     #[test]
     fn transient_events_flash_then_go_dark() {
         assert_eq!(pick(&[ev(5, "failure", "s1")]), Some("failure"));
-        assert_eq!(pick(&[ev(5, "task-done", "s1")]), Some("task-done"));
+        assert_eq!(pick_event(&[ev(5, "task-done", "s1")], NOW, &all_on()), Some("task-done"));
         assert_eq!(pick(&[ev(5, "stop", "s1")]), Some("stop"));
-        // Past the hold window nothing needs the user: ring off, even though
-        // the session is still on the dashboard.
-        assert_eq!(pick(&[ev(TRANSIENT_HOLD_SECS + 5, "failure", "s1")]), None);
+        // Past the hold window the flash is over: a failed session is still a
+        // busy one (falls back to the working colour), a finished one is dark.
+        assert_eq!(pick(&[ev(TRANSIENT_HOLD_SECS + 5, "failure", "s1")]), Some("working"));
         assert_eq!(pick(&[ev(TRANSIENT_HOLD_SECS + 5, "stop", "s1")]), None);
+        // With working off the ring is dark once the flash has passed.
+        let mut cfg = Cfg::default();
+        cfg.events.get_mut("working").unwrap().enabled = false;
+        assert_eq!(pick_event(&[ev(TRANSIENT_HOLD_SECS + 5, "failure", "s1")], NOW, &cfg), None);
     }
 
     #[test]
-    fn working_is_status_not_notification_and_defaults_dark() {
-        assert_eq!(pick(&[ev(5, "working", "s1")]), None);
+    fn mdns_packet_is_a_legacy_unicast_a_query() {
+        let q = mdns_packet("ledring.local").unwrap();
+        assert_eq!(&q[..12], &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&q[12..], b"\x07ledring\x05local\x00\x00\x01\x00\x01");
+        assert!(mdns_packet("ledring.local.").is_some());
+        assert!(mdns_packet("example.com").is_none());
+        assert!(mdns_packet("192.168.1.5").is_none());
+    }
+
+    #[test]
+    fn mdns_answer_finds_the_a_record() {
+        // Response: id 0, QR set, qd=1, an=1; question echoed; answer uses a
+        // compression pointer back to the question name.
+        let mut r = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0];
+        r.extend_from_slice(b"\x07ledring\x05local\x00\x00\x01\x00\x01");
+        r.extend_from_slice(&[0xC0, 12, 0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 1, 5]);
+        assert_eq!(mdns_answer(&r, "ledring.local"), Some(Ipv4Addr::new(192, 168, 1, 5)));
+        assert_eq!(mdns_answer(&r, "other.local"), None);
+        // A query (QR clear) or a truncated packet is never an answer.
+        let mut q = r.clone();
+        q[2] = 0;
+        assert_eq!(mdns_answer(&q, "ledring.local"), None);
+        assert_eq!(mdns_answer(&r[..r.len() - 2], "ledring.local"), None);
+        // A pointer loop must not hang.
+        let mut l = vec![0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+        l.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 1, 2, 3, 4]);
+        assert_eq!(mdns_answer(&l, "x.local"), None);
+    }
+
+    /// Needs the ring on the LAN: `cargo test --lib -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn discovery_against_real_hardware() {
+        let via_mdns = mdns_query("ledring.local");
+        eprintln!("own mDNS query   -> {via_mdns:?}");
+        let local = local_ipv4();
+        eprintln!("local address    -> {local:?}");
+        let via_scan = local.and_then(scan_subnet);
+        eprintln!("subnet sweep     -> {via_scan:?}");
+        // A name nobody answers must fall through the ladder to the sweep.
+        let fallback = resolve_ring("nosuchring.local");
+        eprintln!("bogus name       -> {fallback:?}");
+        assert!(via_mdns.is_some(), "ring did not answer a legacy unicast mDNS query");
+        assert_eq!(via_scan, via_mdns);
+        assert_eq!(fallback, via_mdns);
+        assert!(via_mdns.map(is_ring).unwrap_or(false));
+    }
+
+    #[test]
+    fn working_is_the_default_busy_colour_and_can_be_turned_off() {
+        assert_eq!(pick(&[ev(5, "working", "s1")]), Some("working"));
+        // Status, not notification: it stays lit as long as the agent is busy.
+        assert_eq!(pick(&[ev(3600, "working", "s1")]), Some("working"));
         let mut cfg = Cfg::default();
-        cfg.events.get_mut("working").unwrap().enabled = true;
-        assert_eq!(pick_event(&[ev(5, "working", "s1")], NOW, &cfg), Some("working"));
+        cfg.events.get_mut("working").unwrap().enabled = false;
+        assert_eq!(pick_event(&[ev(5, "working", "s1")], NOW, &cfg), None);
     }
 
     #[test]
     fn needs_you_states_stay_lit_until_answered() {
         // An hour-old unanswered question is still a notification.
         assert_eq!(pick(&[ev(3600, "question", "s1")]), Some("question"));
-        assert_eq!(pick(&[ev(3600, "waiting", "s1")]), Some("waiting"));
-        // Answering it (a new event for that session) clears it.
-        assert_eq!(pick(&[ev(3600, "waiting", "s1"), ev(3000, "working", "s1")]), None);
+        let on = all_on();
+        assert_eq!(pick_event(&[ev(3600, "waiting", "s1")], NOW, &on), Some("waiting"));
+        // Answering it (a new event for that session) clears it; with working
+        // off the ring goes dark.
+        let mut off = all_on();
+        off.events.get_mut("working").unwrap().enabled = false;
+        assert_eq!(pick_event(&[ev(3600, "waiting", "s1"), ev(3000, "working", "s1")], NOW, &off), None);
     }
 
     #[test]
     fn quiet_by_default_events_stay_quiet() {
-        // compact and session-start default to LED off, like their banners.
-        assert_eq!(pick(&[ev(5, "compact", "s1")]), None);
+        // compact and session-start default to LED off, like their banners;
+        // waiting and task-done are off too (see the LADDER note). A disabled
+        // rung is skipped, so the ring shows the session's standing instead:
+        // compacting/task-done sessions are busy (working), a fresh one is dark.
+        assert_eq!(pick(&[ev(5, "compact", "s1")]), Some("working"));
+        assert_eq!(pick(&[ev(5, "task-done", "s1")]), Some("working"));
         assert_eq!(pick(&[ev(5, "session-start", "s1")]), None);
+        assert_eq!(pick(&[ev(5, "waiting", "s1")]), None);
+        let mut cfg = Cfg::default();
+        cfg.events.get_mut("working").unwrap().enabled = false;
+        for e in ["compact", "session-start", "waiting", "task-done"] {
+            assert_eq!(pick_event(&[ev(5, e, "s1")], NOW, &cfg), None, "{e}");
+        }
     }
 
     #[test]

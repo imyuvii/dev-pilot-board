@@ -84,6 +84,16 @@ dashboard as fake sessions:
   fixes it. Diagnose over serial at 115200 with the baud set on the open fd (`stty -f`
   on `/dev/cu.*` does not survive a separate `open()`): repeating `mmu set` / `rst:`
   lines = boot loop.
+- **Never trust the Mac's resolver for `ledring.local`.** A second Mac on the same
+  subnet reported `ping: unknown host` while this one resolved fine — a VPN client that
+  hijacks DNS, a firewall on "block all incoming", or a multicast-filtering switch all
+  break mDNSResponder silently. `resolve_ring` in `led.rs` therefore walks a ladder:
+  IP literal → getaddrinfo → own legacy-unicast mDNS query (RFC 6762 §6.7, answered
+  straight to our ephemeral port) → remembered IP (`~/.claude/notify-led-cache.json`,
+  re-verified) → /24 sweep for a port-81 listener that answers `STATE?`. The sweep runs
+  at most once a minute. Live check without hardware assumptions:
+  `cargo test --lib -- --ignored --nocapture` (needs the ring on the LAN; delete the
+  cache file it leaves behind).
 - **Opening the USB serial port resets an ESP32** (DTR/RTS → auto-reset). `connect_usb`
   uses `preserve_dtr_on_open()` so the app's periodic probe doesn't reboot the ring;
   without it, `auto` mode with WiFi down would keep kicking a recovering board.
@@ -123,10 +133,10 @@ dashboard as fake sessions:
   `{enabled, transport: auto|wifi|usb, host, brightness, dim_in_quiet_hours,
   events: {<event>: {enabled, color, pattern}}}` — per-event on/off, colour and pattern,
   the same shape of control as sound/banner. Events: `question waiting failure task-done
-  compact session-start working stop`; `compact` and `session-start` default off like
-  their banners, and `working` defaults off because it is a silent status event, not a
-  notification — the ring is dark unless something happened in the last 30s or an agent
-  is waiting on / asking the user (those stay lit until answered). Settings.vue carries unknown top-level keys through its save round-trip,
+  compact session-start working stop`; defaults mirror the author's setup (brightness 5,
+  `working` on as the blue "busy" colour, `question`/`failure`/`stop` on, `waiting`,
+  `task-done`, `compact`, `session-start` off). Transient events show for 30s; question and
+  waiting stay lit until answered. `led.enabled` itself stays off by default. Settings.vue carries unknown top-level keys through its save round-trip,
   so a script-only key added next to `led` survives.
 - **Firmware is never modified from this repo.** The ring speaks one line protocol over
   both transports (`MODE`/`COLOR`/`COLOR2`/`SPEED`/`BRIGHT`), and `led.rs` only ever sends

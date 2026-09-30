@@ -47,14 +47,14 @@ export const LED_EVENTS: {
   color: string;
   pattern: string;
 }[] = [
-  { key: "question", label: "Question asked", emoji: "❓", enabled: true, color: "ff00aa", pattern: "breathe" },
-  { key: "waiting", label: "Waiting for you", emoji: "🟡", enabled: true, color: "ffb000", pattern: "breathe" },
-  { key: "failure", label: "Tool call failed", emoji: "🔴", hint: "30s", enabled: true, color: "ff2020", pattern: "solid" },
-  { key: "task-done", label: "Background task done", emoji: "📦", hint: "30s", enabled: true, color: "00d8ff", pattern: "sparkle" },
+  { key: "question", label: "Question asked", emoji: "❓", enabled: true, color: "ff00aa", pattern: "chase" },
+  { key: "waiting", label: "Waiting for you", emoji: "🟡", enabled: false, color: "0061ff", pattern: "chase" },
+  { key: "failure", label: "Tool call failed", emoji: "🔴", hint: "30s", enabled: true, color: "ff2020", pattern: "fire" },
+  { key: "task-done", label: "Background task done", emoji: "📦", hint: "30s", enabled: false, color: "00d8ff", pattern: "juggle" },
   { key: "compact", label: "Context compacting", emoji: "🌀", hint: "30s", enabled: false, color: "9b59b6", pattern: "breathe" },
   { key: "session-start", label: "Session started", emoji: "🚀", hint: "30s", enabled: false, color: "ffffff", pattern: "chase" },
-  { key: "working", label: "Working", emoji: "🟢", hint: "status, stays on", enabled: false, color: "1e90ff", pattern: "comet" },
-  { key: "stop", label: "Done responding", emoji: "⚪", hint: "30s", enabled: true, color: "00ff66", pattern: "solid" },
+  { key: "working", label: "Working", emoji: "🟢", hint: "status, stays on", enabled: true, color: "1e90ff", pattern: "chase" },
+  { key: "stop", label: "Done responding", emoji: "⚪", hint: "30s", enabled: true, color: "4f7a28", pattern: "breathe" },
 ];
 
 /** The firmware's effect list (ring_control.ino), minus `manual`. */
@@ -73,7 +73,7 @@ export function ledDefaults(): LedCfg {
     enabled: false, // opt-in: off means no mDNS probe and no serial port opened
     transport: "auto",
     host: "ledring.local",
-    brightness: 60,
+    brightness: 5,
     dim_in_quiet_hours: true,
     events,
   };

@@ -110,19 +110,22 @@ busiest session as one colour and one pattern.
 
 - **FR-20b** Both links are supported, as in LED Lab: USB serial at 115200 baud, or a
   WebSocket on port 81 (`ledring.local`). `transport` selects `auto` | `wifi` | `usb`.
+  The host is found without relying on the Mac's resolver: getaddrinfo, then the app's own
+  mDNS query, then the last known address, then a sweep of the local /24 for a device that
+  answers the ring protocol — so a machine whose `.local` lookups are broken still connects.
   `auto` prefers WiFi and falls back to serial, then re-checks WiFi every 15s and releases
   the serial port when the ring reappears on the network — only one process can hold a
   serial port, and this app must not lock out LED Lab or `arduino-cli upload`.
 - **FR-20c** Per-event configuration, like sound and banner: each event has LED on/off,
   a colour and a pattern from the firmware's effect list. Defaults, most urgent first
   (this order is fixed and decides what wins across sessions): question (magenta
-  breathe) > waiting (amber breathe) > failure (red solid) > task-done (cyan sparkle) >
-  compact (purple breathe, off by default) > session-start (white chase, off by
-  default) > working (blue comet, off by default — it is a status, not a notification)
-  > stop / done responding (green solid). The ring is a notification light: dark unless
-  a one-off event (failure, task-done, compact, session-start, stop) happened in the
-  last 30s, or an agent is waiting / asked a question — those stay lit until the user
-  responds. Disabling an event makes the ring fall through to the next rung.
+  chase) > waiting (blue chase, off by default) > failure (red fire) > task-done (cyan
+  juggle, off by default) > compact (purple breathe, off by default) > session-start
+  (white chase, off by default) > working (blue chase — the "agent is busy" colour) >
+  stop / done responding (green breathe). Default brightness is 5. One-off events
+  (failure, task-done, compact, session-start, stop) show for 30s; an agent waiting /
+  asking a question stays lit until the user responds; with nothing to show the ring is
+  dark. Disabling an event makes the ring fall through to the next rung.
 - **FR-20d** The app sends only a pattern name from the firmware's existing effect list
   plus colours, brightness and speed. Adding an agent source or event is a change to the
   mapping in `led.rs`; the firmware is never reflashed for it. The decision runs in the
@@ -200,5 +203,6 @@ busiest session as one colour and one pattern.
 | `app/assets/icon.svg`, `tray.svg` | Icon sources (rendered via sharp, `tauri icon`) |
 | `~/.claude/notify-state.jsonl` | Event log (runtime, not in repo) |
 | `~/.claude/notify-config.json` | User preferences (runtime, not in repo) |
+| `~/.claude/notify-led-cache.json` | Last address the LED ring answered on (runtime, written by the app) |
 | `~/.claude/notify-icons/*.png` | Banner logos (runtime, not in repo) |
 | `~/.copilot/hooks/notify.json` | Copilot CLI hook registration (runtime, not in repo) |

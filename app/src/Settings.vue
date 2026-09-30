@@ -93,9 +93,7 @@ async function findRing() {
 const ledLine = computed(() => {
   if (!config.value.led.enabled) return "Off — the ring is never contacted.";
   if (ledStatus.value.connected)
-    return ledStatus.value.transport === "wifi"
-      ? "Connected over WiFi."
-      : "Connected over USB.";
+    return ledStatus.value.detail || "Connected.";
   return ledStatus.value.detail || "Looking for the ring…";
 });
 
@@ -271,19 +269,20 @@ function setTone(key: string, ev: globalThis.Event) {
         <div class="times">
           <span class="mono-label">LINK</span>
           <select v-model="config.led.transport">
-            <option value="auto">Auto (WiFi, then USB)</option>
+            <option value="auto">Auto (WiFi, Bluetooth, then USB)</option>
             <option value="wifi">WiFi only</option>
+            <option value="ble">Bluetooth only</option>
             <option value="usb">USB only</option>
           </select>
         </div>
-        <div class="times" v-if="config.led.transport !== 'usb'">
+        <div class="times" v-if="config.led.transport === 'auto' || config.led.transport === 'wifi'">
           <span class="mono-label">HOST</span>
           <input v-model="config.led.host" spellcheck="false" placeholder="ledring.local" />
           <button class="mini" :disabled="finding" @click="findRing">
             {{ finding ? "Searching…" : "Find my ring" }}
           </button>
         </div>
-        <div class="find" v-if="report && config.led.transport !== 'usb'">
+        <div class="find" v-if="report && (config.led.transport === 'auto' || config.led.transport === 'wifi')">
           <div v-for="st in report.steps" :key="st.label" class="find-step">
             <span class="find-mark" :class="{ ok: st.ok }">{{ st.ok ? "✓" : "✕" }}</span>
             <span class="find-label">{{ st.label }}</span>

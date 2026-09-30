@@ -147,7 +147,7 @@ dashboard as fake sessions:
   every path is a silent retry with backoff. Nothing about the ring may surface an error
   or affect sounds, banners or the dashboard.
 - **LED config** lives under `led` in the same config file:
-  `{enabled, transport: auto|wifi|usb, host, brightness, dim_in_quiet_hours,
+  `{enabled, transport: auto|wifi|ble|usb, host, brightness, dim_in_quiet_hours,
   events: {<event>: {enabled, color, pattern}}}` — per-event on/off, colour and pattern,
   the same shape of control as sound/banner. Events: `question waiting failure task-done
   compact session-start working stop`; defaults mirror the author's setup (brightness 5,
@@ -161,7 +161,18 @@ dashboard as fake sessions:
   change to `LADDER`/`standing_of` in `led.rs` plus `LED_EVENTS` in `led.ts` — never a
   reflash. An unknown pattern name just earns
   an `ERR unknown mode` and leaves the ring as it was.
-- **Transport preference is WiFi first, USB as fallback.** Only one process can hold a
+- **Bluetooth LE is the third transport** (`src-tauri/src/ble.rs`, btleplug over
+  CoreBluetooth). The ring advertises the Nordic UART Service as "LED Ring"; no OS pairing,
+  no PIN — scan for the service UUID, connect, same line protocol. `led.rs` wraps it as
+  `Conn::Ble`; `ble.rs` bridges the async crate onto the blocking worker with
+  `tauri::async_runtime::block_on` and reassembles `\n`-delimited reply lines from
+  notifications on a channel. Creating the `Manager` is what makes macOS show the
+  Bluetooth prompt (`NSBluetoothAlwaysUsageDescription` in `src-tauri/Info.plist`), so it
+  is lazy and only happens with LED enabled and transport `auto`/`ble`. One Mac at a
+  time — BLE is a 1:1 link, WiFi is the shared one. Firmware side lives in led-iot
+  (`git tag pre-ble` there is the rollback point); test without the app via
+  `led-iot/tools/ble_test.py`.
+- **Transport preference is WiFi, then Bluetooth, then USB.** Only one process can hold a
   serial port and this app runs all day, so squatting on `/dev/cu.usbserial-*` would lock
   out LED Lab, the Arduino IDE and `arduino-cli upload`. In `auto` the worker re-checks
   WiFi every 15s while on serial and hands the port back when the ring appears on the

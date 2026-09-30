@@ -7,6 +7,8 @@
        string is what the prompt shows. -->
   <key>NSLocalNetworkUsageDescription</key>
   <string>Dev Pilot Board looks for your LED ring on the local network so it can mirror your agents' status on it.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Dev Pilot Board connects to your LED ring over Bluetooth to mirror your agents' status on it.</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_http._tcp</string>

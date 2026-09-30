@@ -7,7 +7,7 @@
 // event log and this config itself and owns the whole pipeline; the UI only
 // edits settings and reads back a connection status.
 
-export type LedTransport = "auto" | "wifi" | "usb";
+export type LedTransport = "auto" | "wifi" | "ble" | "usb";
 
 /** Per-event look — same shape of control as sound/banner in the events grid. */
 export interface LedEventCfg {

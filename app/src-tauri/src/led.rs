@@ -12,10 +12,12 @@
 //! quiet retry. Nothing here is allowed to surface an error to the user or to
 //! affect sounds, banners or the dashboard.
 //!
-//! Transport preference is WiFi first. Only one process can hold a USB serial
-//! port, and this app runs all day, so squatting on /dev/cu.usbserial-* would
-//! lock out LED Lab, the Arduino IDE and `arduino-cli upload`. Over WebSocket
-//! several clients coexist, so when WiFi shows up we drop serial and move.
+//! Transport preference is WiFi, then Bluetooth LE, then USB. Only one process
+//! can hold a USB serial port, and this app runs all day, so squatting on
+//! /dev/cu.usbserial-* would lock out LED Lab, the Arduino IDE and
+//! `arduino-cli upload`. Over WebSocket several clients coexist, so when WiFi
+//! shows up we drop serial and move. Bluetooth (see `ble.rs`) needs no network
+//! and no setup on the ring, but is one Mac at a time.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -39,6 +41,11 @@ const DRAIN_WINDOW: Duration = Duration::from_millis(120);
 const WIFI_RECHECK: Duration = Duration::from_secs(15);
 /// How often to ask the ring what it is actually showing, so drift self-heals.
 const RESYNC_PROBE: Duration = Duration::from_secs(5);
+/// The firmware answers every command with a STATE line, so right after an
+/// emit (up to five commands) the replies show intermediate states. Judging
+/// drift from those re-sends everything and starts the cycle again; ignore
+/// STATE lines for this long after we wrote something.
+const SETTLE: Duration = Duration::from_millis(600);
 /// Three reconnects inside this window is treated as the ring rebooting.
 const BROWNOUT_WINDOW: Duration = Duration::from_secs(90);
 /// A link this stable earns full brightness back.
@@ -46,7 +53,7 @@ const BROWNOUT_RECOVER: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LedState {
-    /// "auto" | "wifi" | "usb"
+    /// "auto" | "wifi" | "ble" | "usb"
     pub transport: String,
     /// mDNS name or IP of the ring, e.g. "ledring.local"
     pub host: String,
@@ -513,6 +520,7 @@ fn compute_target() -> Option<LedState> {
 enum Conn {
     Ws(WebSocket<TcpStream>),
     Serial(Box<dyn serialport::SerialPort>),
+    Ble(crate::ble::BleLink),
 }
 
 impl Conn {
@@ -520,6 +528,7 @@ impl Conn {
         match self {
             Conn::Ws(_) => "wifi",
             Conn::Serial(_) => "usb",
+            Conn::Ble(_) => "ble",
         }
     }
 
@@ -535,6 +544,7 @@ impl Conn {
             Conn::Serial(port) => port
                 .write_all(format!("{line}\n").as_bytes())
                 .map_err(|e| e.to_string()),
+            Conn::Ble(link) => link.write_line(line),
         }
     }
 
@@ -550,6 +560,7 @@ impl Conn {
         let deadline = Instant::now() + DRAIN_WINDOW;
         let mut lines = Vec::new();
         match self {
+            Conn::Ble(link) => link.drain(DRAIN_WINDOW),
             Conn::Ws(ws) => {
                 while Instant::now() < deadline {
                     match ws.read() {
@@ -1226,13 +1237,23 @@ fn connect_usb() -> Option<Conn> {
     None
 }
 
+fn connect_ble() -> Option<Conn> {
+    let link = crate::ble::connect()?;
+    dbg(&format!("ble: connected to {}", link.id));
+    Some(Conn::Ble(link))
+}
+
 fn connect(target: &LedState) -> Option<Conn> {
     match target.transport.as_str() {
         "wifi" => connect_wifi(&target.host),
+        "ble" => connect_ble(),
         "usb" => connect_usb(),
-        // auto: WiFi first, serial only as a fallback — see the module note on
-        // why this app must not hold the USB port when it doesn't have to.
-        _ => connect_wifi(&target.host).or_else(connect_usb),
+        // auto: WiFi, then Bluetooth, serial only as the last fallback — see
+        // the module note on why this app must not hold the USB port when it
+        // doesn't have to.
+        _ => connect_wifi(&target.host)
+            .or_else(connect_ble)
+            .or_else(connect_usb),
     }
 }
 
@@ -1276,13 +1297,13 @@ fn emit(conn: &mut Conn, want: &LedState, sent: &Option<LedState>) -> Result<(),
 /// Settings-panel text, so a ring that is dim because of power says so instead
 /// of looking like the brightness slider is broken.
 fn brownout_note(label: &str, div: u8) -> String {
-    let base = if label == "wifi" {
-        match LAST_WIFI_IP.lock().ok().and_then(|s| s.clone()) {
+    let base = match label {
+        "wifi" => match LAST_WIFI_IP.lock().ok().and_then(|s| s.clone()) {
             Some(ip) => format!("Connected over WiFi ({ip})"),
             None => "Connected over WiFi".to_string(),
-        }
-    } else {
-        "Connected over USB".to_string()
+        },
+        "ble" => "Connected over Bluetooth".to_string(),
+        _ => "Connected over USB".to_string(),
     };
     if div > 1 {
         format!("{base} — ring keeps resetting, brightness reduced (check its power)")
@@ -1328,6 +1349,7 @@ fn run() {
     let mut ring: Option<RingSeen> = None;
     let mut ring_ours = false;
     let mut yielding = false;
+    let mut settle_until = Instant::now();
     let mut next_compute = Instant::now();
     // Brownout guard, see `brownout_note` below.
     let mut connects: Vec<Instant> = Vec::new();
@@ -1455,9 +1477,13 @@ fn run() {
             if hold_off {
                 sent = Some(target.clone());
             } else {
+                let changed = sent.as_ref() != Some(&target);
                 failed = emit(c, &target, &sent).is_err();
                 if !failed {
                     sent = Some(target.clone());
+                    if changed {
+                        settle_until = Instant::now() + SETTLE;
+                    }
                 }
             }
             // Ask what the ring is really showing, on a slower cadence than
@@ -1470,6 +1496,9 @@ fn run() {
                 match c.drain() {
                     Ok(lines) => {
                         for l in &lines {
+                            if Instant::now() < settle_until {
+                                continue; // replies to our own commands, not drift
+                            }
                             let Some(seen) = ring_seen(l, &target.looks) else { continue };
                             ring = Some(seen);
                             ring_ours = state_matches(l, &target) == Some(true);

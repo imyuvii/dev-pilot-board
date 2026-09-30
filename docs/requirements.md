@@ -108,8 +108,10 @@ the hook script reads it. Either side works when the other is absent.
 An external 16-LED WS2812B ring on an ESP32 (the `led-iot` project) can mirror the board's
 busiest session as one colour and one pattern.
 
-- **FR-20b** Both links are supported, as in LED Lab: USB serial at 115200 baud, or a
-  WebSocket on port 81 (`ledring.local`). `transport` selects `auto` | `wifi` | `usb`.
+- **FR-20b** Three links are supported: USB serial at 115200 baud, a WebSocket on port 81
+  (`ledring.local`), or Bluetooth LE (Nordic UART Service, advertised as "LED Ring" — no
+  OS pairing, no PIN; macOS asks the app for Bluetooth once). `transport` selects
+  `auto` | `wifi` | `ble` | `usb`; `auto` tries WiFi, then Bluetooth, then USB.
   The host is found without relying on the Mac's resolver: getaddrinfo, then the app's own
   mDNS query, then the last known address, then a sweep of the local /24 for a device that
   answers the ring protocol — so a machine whose `.local` lookups are broken still connects.
